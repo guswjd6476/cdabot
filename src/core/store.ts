@@ -84,6 +84,32 @@ export async function updateMembership(orgId: number, membershipId: number, patc
     return res.rows.length > 0;
 }
 
+// 등록된 단체방 (chat_id → 조직)
+export async function getGroupOrg(chatId: number, moduleKey: string): Promise<number | undefined> {
+    return (await query(`SELECT org_id FROM cdabot_group_chats WHERE chat_id = $1 AND module_key = $2;`, [String(chatId), moduleKey])).rows[0]?.org_id;
+}
+
+export async function setGroupOrg(chatId: number, moduleKey: string, orgId: number | null, title?: string, by?: number) {
+    if (orgId === null) return void (await query(`DELETE FROM cdabot_group_chats WHERE chat_id = $1 AND module_key = $2;`, [String(chatId), moduleKey]));
+    await query(
+        `INSERT INTO cdabot_group_chats (chat_id, module_key, org_id, title, created_by) VALUES ($1, $2, $3, $4, $5)
+         ON CONFLICT (chat_id, module_key) DO UPDATE SET org_id = EXCLUDED.org_id, title = EXCLUDED.title;`,
+        [String(chatId), moduleKey, orgId, title || null, by || null]
+    );
+}
+
+// 자동 등록: 처음이면 대원(active)으로, 가입 대기였으면 활성화. 비활성·거절된 사람은 그대로 둠. 새로 활성화되면 true
+export async function autoEnroll(orgId: number, userId: number, moduleKey: string, displayName: string): Promise<boolean> {
+    const res = await query(
+        `INSERT INTO cdabot_memberships (org_id, user_id, module_key, display_name, status) VALUES ($1, $2, $3, $4, 'active')
+         ON CONFLICT (org_id, user_id, module_key) DO UPDATE SET status = 'active', updated_at = NOW()
+         WHERE cdabot_memberships.status = 'pending'
+         RETURNING id;`,
+        [orgId, userId, moduleKey, displayName]
+    );
+    return res.rows.length > 0;
+}
+
 export async function getSettings(orgId: number, moduleKey: string): Promise<Record<string, any>> {
     return (await query(`SELECT settings FROM cdabot_modules WHERE org_id = $1 AND module_key = $2;`, [orgId, moduleKey])).rows[0]?.settings || {};
 }

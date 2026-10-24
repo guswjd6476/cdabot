@@ -306,6 +306,28 @@ test('단체방(대원) / 1:1 대화(관리자) — 장소 안내, 남의 버튼
     assert.match(await press(ADMIN, approve), /✅ 승인/);
 });
 
+test('등록된 단체방에서는 가입 요청 없이 자동 대원 등록', async () => {
+    const ROOM = -100777;
+    assert.match(await send(707, '/특전대', ++messageId, ROOM), /등록되어 있지 않습니다/); // 등록 전
+    assert.match(await send(101, '/특전대 방등록', ++messageId, ROOM), /권한이 없습니다/); // 대원은 불가
+    assert.match(await send(ADMIN, '/특전대 방등록'), /단체방에서 사용해주세요/); // 1:1 에서는 불가
+    assert.match(await send(ADMIN, '/특전대 방등록', ++messageId, ROOM), /자동 등록/);
+
+    assert.match(await send(707, '/특전대', ++messageId, ROOM), /U707 \(대원\)/); // 가입 요청했던 사람도 바로 활성
+    assert.match(await send(808, '/특전대 제출', ++messageId, ROOM), /활동 시간을 받는 주차|월요일/); // 처음 온 사람도 바로 사용
+    const m = (await getMember(1, S.MODULE_KEY, { telegramId: '808' }))!;
+    assert.equal(m.status, 'active');
+    assert.deepEqual(m.perms, ['member']); // 관리자 권한은 자동으로 주지 않음
+
+    await send(ADMIN, '/특전대 비활성 808');
+    assert.match(await send(808, '/특전대', ++messageId, ROOM), /비활성화된 계정/); // 비활성화는 되살아나지 않음
+    assert.match(await send(909, '/특전대'), /등록되어 있지 않습니다/); // 등록 안 된 방은 기존대로
+
+    assert.match(await send(ADMIN, '/특전대 방해제', ++messageId, ROOM), /해제/);
+    assert.match(await send(919, '/특전대', ++messageId, ROOM), /등록되어 있지 않습니다/);
+    await send(ADMIN, '/특전대 비활성 707'); // 다음 테스트 인원 수에 영향 없게
+});
+
 test('[14] 조직별 데이터 분리', async () => {
     const org2 = (await createOrg('제2조직'))!;
     const u = await upsertUser(401, 'U401');
@@ -318,8 +340,8 @@ test('[14] 조직별 데이터 분리', async () => {
     assert.match(await send(401, '/특전대'), /제2조직/);
     assert.match(await send(401, '/특전대 결과검색'), /권한이 없습니다/);
 
-    // 조직이 2개가 되면 시스템 관리자는 조직을 골라야 함
-    assert.match(await send(ADMIN, '/특전대'), /조직을 선택/);
+    // 조직이 2개면 시스템 관리자는 조직을 골라 전환
+    assert.match(await send(ADMIN, '/특전대 조직'), /조직을 선택/); // 조직 전환 (마지막 선택은 기억됨)
     await press(ADMIN, `core:org:special:${org2.id}`);
     assert.match(await send(ADMIN, '/특전대 결과검색 도구:전단'), /총 <b>1<\/b>건/);
     await press(ADMIN, 'core:org:special:1');

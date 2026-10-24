@@ -2,7 +2,7 @@
 // 모든 기능은 봇과의 1:1 대화에서만 동작 (단체방에 개인정보가 올라가지 않게)
 import { Markup, Telegraf } from 'telegraf';
 import { Access, askOrg, hasPerm, Need, notifyManagers, registerModule, resolveAccess, session } from '../core/engine';
-import { audit, getMember, getSettings, listMembers, listOrgs, Membership, Perm, PERMS, setSetting, updateMembership, upsertMembership, upsertUser } from '../core/store';
+import { audit, autoEnroll, getGroupOrg, getMember, setGroupOrg, getSettings, listMembers, listOrgs, Membership, Perm, PERMS, setSetting, updateMembership, upsertMembership, upsertUser } from '../core/store';
 import { dayjs, escapeHtml, getErrorMessage, nowKst, parseFlexibleDate, replyLong, splitLongMessage } from '../utils';
 import * as T from './time';
 import * as R from './result';
@@ -50,13 +50,14 @@ const dmButton = (ctx: Ctx) => {
     return me ? Markup.inlineKeyboard([[Markup.button.url('1:1 대화 열기', `https://t.me/${me}?start=sd`)]]) : {};
 };
 // 대원 기능은 단체방, 관리자 기능은 1:1 대화에서만 (권한 없는 기능은 장소와 무관하게 ⛔)
-const placeOf = (need: Need) => (need === 'member' ? 'group' : need ? 'private' : 'any');
-const placeOk = (ctx: Ctx, need: Need) => placeOf(need) !== (inPrivate(ctx) ? 'group' : 'private');
+type Place = 'group' | 'private' | 'any';
+const placeOf = (x: Action): Place => x.place ?? (x.need === 'member' ? 'group' : x.need ? 'private' : 'any');
+const placeOk = (ctx: Ctx, x: Action) => placeOf(x) !== (inPrivate(ctx) ? 'group' : 'private');
 const MSG_GO_GROUP = '👥 대원 기능(활동 시간·결과 제출, 내 현황)은 특전대 단체방에서 사용해주세요.';
 const MSG_GO_DM = '🔒 관리자 기능은 봇과 1:1 대화에서 사용해주세요.';
-async function wrongPlace(ctx: Ctx, need: Need): Promise<boolean> {
-    if (placeOk(ctx, need)) return false;
-    if (inPrivate(ctx)) await ctx.reply(MSG_GO_GROUP);
+async function wrongPlace(ctx: Ctx, x: Action): Promise<boolean> {
+    if (placeOk(ctx, x)) return false;
+    if (inPrivate(ctx)) await ctx.reply(x.need === 'member' ? MSG_GO_GROUP : '👥 이 명령은 특전대 단체방에서 사용해주세요.');
     else await ctx.reply(MSG_GO_DM, dmButton(ctx));
     return true;
 }
@@ -117,7 +118,22 @@ async function pickPeriod(a: A, args: string) {
 
 /* ====================== 메뉴 · 권한 ====================== */
 
-type Action = { label?: string; need: Need; run: (ctx: Ctx, a: A, args: string) => Promise<unknown> };
+type Action = { label?: string; need: Need; place?: Place; run: (ctx: Ctx, a: A, args: string) => Promise<unknown> };
+
+// 등록된 특전대 단체방이면 사용자를 그 조직 대원으로 자동 등록한 뒤 권한 확인
+async function access(ctx: Ctx): Promise<Access> {
+    if (!inPrivate(ctx) && ctx.chat && ctx.from) {
+        const orgId = await getGroupOrg(ctx.chat.id, MK);
+        if (orgId) {
+            const name = [ctx.from.first_name, ctx.from.last_name].filter(Boolean).join(' ') || String(ctx.from.id);
+            const user = await upsertUser(ctx.from.id, name);
+            if (await autoEnroll(orgId, user.id, MK, name)) await audit(orgId, user.id, 'member.auto_enroll', ctx.chat.id);
+            const s = await session(ctx);
+            s.org = { ...(s.org || {}), [MK]: orgId };
+        }
+    }
+    return resolveAccess(ctx, MK);
+}
 
 const ACTIONS: Record<string, Action> = {
     제출: { label: '📝 활동 시간 제출', need: 'member', run: startAvail },
@@ -147,10 +163,12 @@ const ACTIONS: Record<string, Action> = {
     기준: { need: 'sysadmin', run: setMin },
     보관기간: { need: 'sysadmin', run: setRetention },
     조직: { need: null, run: (ctx, a) => askOrg(ctx, MK, a) },
+    방등록: { need: 'manager', place: 'group', run: registerGroup },
+    방해제: { need: 'manager', place: 'group', run: unregisterGroup },
 };
 
 async function dispatch(ctx: Ctx, sub = '', args = '') {
-    const a = await resolveAccess(ctx, MK);
+    const a = await access(ctx);
     const s = await session(ctx);
     delete s.flow; // 다른 메뉴로 이동하면 진행 중인 입력은 취소
     s.current = MK;
@@ -163,7 +181,7 @@ async function dispatch(ctx: Ctx, sub = '', args = '') {
         if (!a.sysadmin && a.membership?.status !== 'active') return joinScreen(ctx, a);
         return void (await ctx.reply('⛔ 이 기능을 사용할 권한이 없습니다.'));
     }
-    if (await wrongPlace(ctx, action.need)) return;
+    if (await wrongPlace(ctx, action)) return;
     await action.run(ctx, a as A, args.trim());
 }
 
@@ -171,9 +189,9 @@ async function menu(ctx: Ctx, a: A) {
     if (!a.sysadmin && a.membership?.status !== 'active') return joinScreen(ctx, a);
     const p = await S.getLatestPeriod(a.org.id);
     const role = a.sysadmin ? '시스템 관리자' : a.membership!.perms.map((x) => PERM_LABEL[x]).join(' · ');
-    const items = Object.entries(ACTIONS).filter(([, x]) => x.label && hasPerm(a, x.need) && placeOk(ctx, x.need));
+    const items = Object.entries(ACTIONS).filter(([, x]) => x.label && hasPerm(a, x.need) && placeOk(ctx, x));
     // 이 장소에서 못 쓰는 내 기능이 있으면 어디서 쓰는지 안내
-    const elsewhere = Object.values(ACTIONS).some((x) => x.label && hasPerm(a, x.need) && !placeOk(ctx, x.need));
+    const elsewhere = Object.values(ACTIONS).some((x) => x.label && hasPerm(a, x.need) && !placeOk(ctx, x));
     const note = !elsewhere ? '' : inPrivate(ctx) ? `\n\n${MSG_GO_GROUP}` : `\n\n${MSG_GO_DM}`;
     const buttons = chunk(
         items.map(([k, x]) => btn(x.label!, `sd:a:${k}`)),
@@ -211,7 +229,7 @@ async function doJoin(ctx: Ctx, orgId: number) {
     const orgs = await listOrgs();
     const org = orgs.find((o) => o.id === orgId);
     if (!org) return;
-    const a = await resolveAccess(ctx, MK);
+    const a = await access(ctx);
     const s = await session(ctx);
     const name = s.joinName || [ctx.from.first_name, ctx.from.last_name].filter(Boolean).join(' ') || String(ctx.from.id);
     const before = a.memberships.find((m) => m.org_id === orgId);
@@ -626,7 +644,7 @@ async function handleFreeForm(ctx: Ctx, text: string): Promise<boolean> {
         await ctx.reply('👥 결과는 특전대 단체방에 올려주세요.');
         return true;
     }
-    const a = await resolveAccess(ctx, MK);
+    const a = await access(ctx);
     if (!a.org || !hasPerm(a, 'member')) {
         await ctx.reply('🪖 결과를 제출하려면 먼저 특전대 대원 등록이 필요합니다. /특전대 를 눌러 가입 요청해주세요.');
         return true;
@@ -958,6 +976,20 @@ async function resultsCsv(ctx: Ctx, a: A, rows: S.ResultRow[], name: string) {
 
 /* ====================== 주차 · 대원 · 설정 관리 ====================== */
 
+async function registerGroup(ctx: Ctx, a: A) {
+    await setGroupOrg(ctx.chat.id, MK, a.org.id, ctx.chat.title, a.userId);
+    await audit(a.org.id, a.userId, 'group.register', ctx.chat.id);
+    await ctx.reply(
+        `✅ 이 방을 [${a.org.name}] ${NAME} 단체방으로 등록했습니다.\n이제 이 방에서 /특전대 를 쓰는 사람은 가입 요청 없이 대원으로 자동 등록됩니다.\n(관리자가 비활성화한 사람은 제외 · 해제: /특전대 방해제)`
+    );
+}
+
+async function unregisterGroup(ctx: Ctx, a: A) {
+    await setGroupOrg(ctx.chat.id, MK, null);
+    await audit(a.org.id, a.userId, 'group.unregister', ctx.chat.id);
+    await ctx.reply('🔓 단체방 등록을 해제했습니다. 이제 이 방의 새 사용자는 가입 요청이 필요합니다. (이미 등록된 대원은 그대로)');
+}
+
 async function closePeriod(ctx: Ctx, a: A) {
     const p = await S.getEditablePeriod(a.org.id, -1); // -1: 수정 허용 예외 없이 '열린' 주차만
     if (!p) return void (await ctx.reply('ℹ️ 제출을 받는 주차가 없습니다.'));
@@ -1101,6 +1133,7 @@ const HELP_MANAGER =
     '• <code>/특전대 시간표 [날짜] [요일]</code> · <code>오늘현황 [날짜]</code> · <code>개인현황 [이름]</code>\n' +
     '• <code>/특전대 결과검색 기간:10.1~10.24 인도지역:서울</code>\n' +
     '• <code>/특전대 미제출</code> · <code>부족시간</code> · <code>마감</code> · <code>재개방 [날짜]</code> · <code>주차시작 [날짜]</code> · <code>수정허용 ID</code>\n' +
+    '• 단체방에서: <code>/특전대 방등록</code> (그 방 사람은 가입 요청 없이 자동 대원) · <code>방해제</code>\n' +
     '• <code>/특전대 대원</code> · <code>승인</code> · <code>등록 ID 이름</code> · <code>활성/비활성 ID</code> · <code>이름 ID 새이름</code> · <code>옵션</code> · <code>결과수정 번호</code>';
 const HELP_ADMIN = '\n\n🛠 <b>시스템 관리자</b>\n• <code>/특전대 권한 ID member,manager,pii</code> · <code>기준 6</code> · <code>보관기간 365</code> · <code>/조직</code>';
 
@@ -1133,7 +1166,7 @@ export function registerSida(bot: Telegraf<any>) {
             const [op, arg = ''] = [ctx.match[1], ctx.match[2] ?? ''];
             if (op === 'a') return dispatch(ctx, arg);
             if (op === 'jo') return doJoin(ctx, Number(arg));
-            const a = await resolveAccess(ctx, MK);
+            const a = await access(ctx);
             if (op === 'ap' || op === 'rj') return decideJoin(ctx, a, arg, op === 'ap');
             if (!a.org) return dispatch(ctx);
             const s = await session(ctx);
