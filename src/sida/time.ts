@@ -8,7 +8,7 @@ export interface DayInput {
 }
 export type DayStatus = 'missing' | 'unavailable' | 'ok' | 'short';
 
-export const WEEKDAYS = [1, 2, 3, 4, 5] as const; // 월~금
+export const WEEKDAYS = [1, 2, 3, 4, 5, 6, 7] as const; // 월~일
 export const DAY_NAMES = ['', '월', '화', '수', '목', '금', '토', '일'];
 export const DEFAULT_MIN_MINUTES = 360; // 하루 최소 6시간
 
@@ -83,6 +83,27 @@ export const STATUS_LABEL: Record<DayStatus, string> = {
     ok: '✅ 충족',
     short: '⚠️ 미충족',
 };
+
+// 한 메시지로 일주일 입력: '월/09:00-14:00,18:00-21:00 화/12:00-14:00 수/불가'
+// 요일+'/'(또는 ':') 표시와 시간 구간이 없으면 null (일반 대화로 봄). 적힌 요일만 days 에 담김
+export function parseWeekText(raw: string): { days: Record<number, DayInput>; errors: string[] } | null {
+    const text = raw.normalize('NFKC');
+    const marks = [...text.matchAll(/(?:^|[\s,])([월화수목금토일])(?:요일)?\s*[\/:]/g)];
+    if (!marks.length || !/\d\s*[~\-–—〜]\s*\d|불가/.test(text)) return null;
+    const days: Record<number, DayInput> = {};
+    const errors: string[] = [];
+    marks.forEach((m, i) => {
+        const w = DAY_NAMES.indexOf(m[1]);
+        const body = text.slice(m.index! + m[0].length, marks[i + 1]?.index ?? text.length).trim();
+        if (days[w]) errors.push(`${m[1]}요일이 두 번 적혀 있습니다.`);
+        if (/^(불가|활동\s*불가|없음|휴무|x)$/i.test(body)) return void (days[w] = { unavailable: true, slots: [] });
+        const r = parseRanges(body);
+        if (!r.slots.length && !r.errors.length) errors.push(`${m[1]}요일 시간이 비어 있습니다.`);
+        errors.push(...r.errors.map((er) => `${m[1]}요일: ${er}`));
+        days[w] = { unavailable: false, slots: r.slots };
+    });
+    return { days, errors };
+}
 
 export interface Segment {
     start: number;

@@ -23,12 +23,9 @@ const weekStartOf = (ymd: string) => {
     return d.subtract((d.day() + 6) % 7, 'day').format('YYYY-MM-DD');
 };
 const dateOf = (weekStart: string, w: number) => dayjs(weekStart).add(w - 1, 'day');
-const weekLabel = (ws: string) => `${dayjs(ws).format('M/D')}~${dateOf(ws, 5).format('M/D')}`;
+const weekLabel = (ws: string) => `${dayjs(ws).format('M/D')}~${dateOf(ws, 7).format('M/D')}`;
 const chunk = <X>(items: X[], n: number) => Array.from({ length: Math.ceil(items.length / n) }, (_, i) => items.slice(i * n, i * n + n));
-const weekdayOf = (ymd: string) => {
-    const d = dayjs(ymd).day();
-    return d >= 1 && d <= 5 ? d : 0; // 0 = 주말
-};
+const weekdayOf = (ymd: string) => dayjs(ymd).day() || 7; // 월=1 … 일=7
 
 async function show(ctx: Ctx, html: string, buttons?: Buttons) {
     const kb = buttons ? Markup.inlineKeyboard(buttons) : {};
@@ -110,7 +107,7 @@ function renderPersonWeek(ws: string, days: S.WeekDays | undefined, min: number)
 // 인자에서 날짜·요일 추출 → 해당 주차 (없으면 최신 주차)
 async function pickPeriod(a: A, args: string) {
     const date = parseFlexibleDate(args);
-    const dayMatch = args.replace(/\d{1,2}\s*월/g, '').match(/(?:^|\s)([월화수목금])(?:요일)?(?=\s|$)/);
+    const dayMatch = args.replace(/\d{1,2}\s*[월일]/g, '').match(/(?:^|\s)([월화수목금토일])(?:요일)?(?=\s|$)/);
     const day = dayMatch ? T.DAY_NAMES.indexOf(dayMatch[1]) : 0;
     const period = date ? await S.getPeriodByWeek(a.org.id, weekStartOf(date)) : await S.getLatestPeriod(a.org.id);
     return { period, day, date };
@@ -306,7 +303,7 @@ async function startAvail(ctx: Ctx, a: A) {
 async function renderDay(ctx: Ctx, f: AvailFlow, note = '') {
     const d = f.days[f.day];
     const total = T.totalMinutes(d.slots);
-    let html = `📝 <b>활동 가능 시간 제출</b> (${weekLabel(f.weekStart)})\n<b>[${T.DAY_NAMES[f.day]}요일 ${dateOf(f.weekStart, f.day).format('M/D')}]</b> ${f.day}/5\n\n`;
+    let html = `📝 <b>활동 가능 시간 제출</b> (${weekLabel(f.weekStart)})\n<b>[${T.DAY_NAMES[f.day]}요일 ${dateOf(f.weekStart, f.day).format('M/D')}]</b> ${f.day}/${T.WEEKDAYS.length}\n\n`;
     if (d.unavailable) html += '🚫 <b>활동 불가</b>로 표시됨\n';
     else if (!d.slots.length) html += '아직 입력한 시간이 없습니다.\n';
     else {
@@ -316,21 +313,21 @@ async function renderDay(ctx: Ctx, f: AvailFlow, note = '') {
     if (note) html += `\n${note}\n`;
     html += f.mode?.startsWith('edit:')
         ? `\n✏️ <b>${Number(f.mode.slice(5)) + 1}번 구간</b>을 대신할 시간을 보내주세요. 예: <code>10:00~13:00</code>`
-        : '\n👉 시간 구간을 메시지로 보내주세요.\n예: <code>09:00~12:00</code> · 여러 개는 쉼표로 <code>09:00~12:00, 14:00~17:00</code>';
+        : '\n👉 시간 구간을 메시지로 보내주세요.\n예: <code>09:00~12:00</code> · 여러 개는 쉼표로 <code>09:00~12:00, 14:00~17:00</code>\n💡 한 번에: <code>월/09:00-14:00,18:00-21:00 화/12:00-14:00 수/불가</code>';
     const buttons: Buttons = [[btn('🕘 버튼으로 추가', 'sd:av:bs')]];
     if (d.slots.length) buttons[0].push(btn('✏️ 수정', 'sd:av:el'), btn('🗑 삭제', 'sd:av:dl'));
     buttons.push([btn(d.unavailable ? '↩️ 활동 불가 해제' : '🚫 이 날 활동 불가', 'sd:av:un')]);
-    buttons.push([...(f.day > 1 && !f.review ? [btn('◀ 이전 요일', 'sd:av:pv')] : []), btn(f.review || f.day === 5 ? '✅ 입력 완료 → 요약' : '✅ 입력 완료 ▶', 'sd:av:nx')]);
+    buttons.push([...(f.day > 1 && !f.review ? [btn('◀ 이전 요일', 'sd:av:pv')] : []), btn(f.review || f.day === T.WEEKDAYS.length ? '✅ 입력 완료 → 요약' : '✅ 입력 완료 ▶', 'sd:av:nx')]);
     buttons.push([btn('✖ 취소', 'sd:av:cx')]);
     await show(ctx, html, buttons);
 }
 
-async function renderReview(ctx: Ctx, f: AvailFlow) {
+async function renderReview(ctx: Ctx, f: AvailFlow, note = '') {
     f.review = true;
     f.mode = undefined;
-    await show(ctx, `📋 <b>제출 내용 확인</b> (${weekLabel(f.weekStart)})\n\n${renderPersonWeek(f.weekStart, f.days, f.min)}\n\n확인 후 <b>최종 제출</b>을 눌러주세요.`, [
+    await show(ctx, `📋 <b>제출 내용 확인</b> (${weekLabel(f.weekStart)})\n\n${renderPersonWeek(f.weekStart, f.days, f.min)}${note}\n\n확인 후 <b>최종 제출</b>을 눌러주세요.`, [
         [btn('✅ 최종 제출', 'sd:av:ok')],
-        T.WEEKDAYS.map((w) => btn(`${T.DAY_NAMES[w]} 수정`, `sd:av:go:${w}`)),
+        T.WEEKDAYS.map((w) => btn(T.DAY_NAMES[w], `sd:av:go:${w}`)),
         [btn('✖ 취소', 'sd:av:cx')],
     ]);
 }
@@ -408,7 +405,7 @@ async function availCb(ctx: Ctx, a: A, s: Record<string, any>, arg: string) {
         case 'nx':
             if (!d.unavailable && !d.slots.length) return renderDay(ctx, f, '⚠️ 시간을 추가하거나 [이 날 활동 불가]를 선택해주세요.');
             f.mode = undefined;
-            if (f.review || f.day === 5) return renderReview(ctx, f);
+            if (f.review || f.day === T.WEEKDAYS.length) return renderReview(ctx, f);
             f.day++;
             break;
         case 'go':
@@ -658,6 +655,51 @@ async function resultCb(ctx: Ctx, a: A, s: Record<string, any>, arg: string) {
     await askNext(ctx, f);
 }
 
+// 단체방에 '월/09:00-14:00 화/…' → 확인 화면 (최종 제출 버튼으로 저장)
+async function handleWeekText(ctx: Ctx, text: string): Promise<boolean> {
+    const parsed = T.parseWeekText(text);
+    if (!parsed) return false;
+    if (inPrivate(ctx)) {
+        await ctx.reply(MSG_GO_GROUP);
+        return true;
+    }
+    const a = await access(ctx);
+    if (!a.org || !hasPerm(a, 'member')) {
+        await ctx.reply('🪖 활동 시간을 제출하려면 먼저 특전대 대원 등록이 필요합니다. /특전대 를 눌러주세요.');
+        return true;
+    }
+    if (parsed.errors.length) {
+        await ctx.reply(`⚠️ ${parsed.errors.join('\n')}\n\n예: 월/09:00-14:00,18:00-21:00 화/12:00-14:00 수/불가`);
+        return true;
+    }
+    const p = await S.getEditablePeriod(a.org.id, a.userId);
+    if (!p) {
+        await ctx.reply('⏳ 지금은 활동 시간을 받는 주차가 없습니다 (마감되었거나 시작 전). 관리자에게 문의해주세요.');
+        return true;
+    }
+    const [existing, settings] = await Promise.all([S.getSubmissions(p.id).then((m) => m.get(a.userId)), getSettings(a.org.id, MK)]);
+    // 적은 요일만 바꾸고, 안 적은 요일은 기존 제출 유지 (처음이면 활동 불가)
+    const days: S.WeekDays = Object.fromEntries(T.WEEKDAYS.map((w) => [w, parsed.days[w] ?? existing?.days[w] ?? { unavailable: true, slots: [] }]));
+    const untouched = T.WEEKDAYS.filter((w) => !parsed.days[w]);
+    const f: AvailFlow = {
+        kind: 'avail',
+        chatId: ctx.chat.id,
+        orgId: a.org.id,
+        periodId: p.id,
+        weekStart: p.week_start,
+        min: Number(settings.min_minutes) || T.DEFAULT_MIN_MINUTES,
+        day: 1,
+        days,
+        existed: !!existing,
+    };
+    (await session(ctx)).flow = f;
+    const note = untouched.length
+        ? `\n\nℹ️ 안 적은 요일(${untouched.map((w) => T.DAY_NAMES[w]).join(', ')}): ${existing ? '기존 제출 그대로' : '활동 불가로 표시'} — 바꾸려면 아래 요일 버튼`
+        : '';
+    await renderReview(ctx, f, note);
+    return true;
+}
+
 // 단체방에 '발/…' 또는 '찾/…' 양식 → 자동 정리 후 빠지거나 틀린 칸만 질문
 async function handleFreeForm(ctx: Ctx, text: string): Promise<boolean> {
     const forms = R.parseSlashForms(text);
@@ -755,7 +797,8 @@ async function sendTimetable(ctx: Ctx, a: A, period: S.Period, day: number) {
     }
     await S.saveSnapshot(period.id, a.userId, snapshot);
     await show(ctx, html, [
-        [...T.WEEKDAYS.map((w) => btn(T.DAY_NAMES[w], `sd:tt:${period.id}-${w}`)), btn('전체', `sd:tt:${period.id}-0`)],
+        T.WEEKDAYS.map((w) => btn(T.DAY_NAMES[w], `sd:tt:${period.id}-${w}`)),
+        [btn('전체', `sd:tt:${period.id}-0`)],
         [btn('📥 CSV 내보내기', `sd:tc:${period.id}`)],
     ]);
 }
@@ -794,15 +837,14 @@ async function todayReport(ctx: Ctx, a: A, args: string) {
     const w = weekdayOf(date);
     const period = await S.getPeriodByWeek(a.org.id, weekStartOf(date));
     const [{ members, subs, min }, results] = await Promise.all([loadWeek(a.org.id, period), S.listResults(a.org.id, { from: date, to: date })]);
-    const people = w ? weekTable(members, subs, min, w).people : [];
+    const people = weekTable(members, subs, min, w).people;
     const count = (st: T.DayStatus) => people.filter((p) => p.status === st).length;
     const byUser = new Map<number, number>();
     for (const r of results) byUser.set(r.user_id, (byUser.get(r.user_id) || 0) + 1);
 
     let html = `📈 <b>[${NAME} 일일 현황] ${date} (${'일월화수목금토'[dayjs(date).day()]})</b>\n생성 시각: ${nowKst().format('YYYY-MM-DD HH:mm')}\n`;
     html += `\n<b>1. 활동 가능 시간</b>\n• 등록 대원: ${members.length}명\n`;
-    if (!w) html += '• 주말 — 활동 가능 시간 취합 대상이 아닙니다.\n';
-    else if (!period) html += '• 이 주차는 취합이 시작되지 않았습니다.\n';
+    if (!period) html += '• 이 주차는 취합이 시작되지 않았습니다.\n';
     else
         html +=
             `• 제출 완료: ${people.length - count('missing')}명 · 미제출: ${count('missing')}명\n` +
@@ -860,8 +902,8 @@ async function personal(ctx: Ctx, a: A, args: string) {
         .map((m) => {
             const days = subs.get(m.user_id)?.days;
             const mine = results.filter((r) => r.user_id === m.user_id);
-            const todayStatus = w ? T.dayStatus(days?.[w], min) : null;
-            const todayTxt = !todayStatus ? '주말' : todayStatus === 'ok' || todayStatus === 'short' ? `${T.fmtHours(T.totalMinutes(days![w].slots))} ${T.STATUS_LABEL[todayStatus]}` : T.STATUS_LABEL[todayStatus];
+            const todayStatus = T.dayStatus(days?.[w], min);
+            const todayTxt = todayStatus === 'ok' || todayStatus === 'short' ? `${T.fmtHours(T.totalMinutes(days![w].slots))} ${T.STATUS_LABEL[todayStatus]}` : T.STATUS_LABEL[todayStatus];
             const short = days ? T.WEEKDAYS.filter((x) => T.dayStatus(days[x], min) === 'short').map((x) => T.DAY_NAMES[x]) : [];
             return (
                 `• <b>${e(m.display_name)}</b>\n   오늘 ${todayTxt} · 결과 ${mine.filter((r) => r.activity_date === today()).length}건\n` +
@@ -1173,7 +1215,8 @@ async function setRetention(ctx: Ctx, a: A, args: string) {
 const HELP_MEMBER =
     `🪖 <b>[${NAME} 사용법]</b> (대원: 단체방 · 관리자: 봇과 1:1 대화)\n\n` +
     '• <code>/특전대</code> — 메뉴\n' +
-    '• <code>/특전대 제출</code> — 월~금 활동 가능 시간 제출·수정 (예: <code>09:00~12:00, 14:00~17:00</code>)\n' +
+    '• 활동 가능 시간 한 번에: <code>월/09:00-14:00,18:00-21:00 화/12:00-14:00 수/불가</code> (적은 요일만 바뀜, 처음 제출이면 안 적은 요일은 활동 불가)\n' +
+    '• <code>/특전대 제출</code> — 월~일 하루씩 버튼으로 제출·수정\n' +
     '• <code>/특전대 내현황</code> — 내 요일별·주간 활동 가능 시간과 결과 건수\n' +
     '• <code>/특전대 결과</code> — 당일 결과 단계별 입력 (발굴건/찾기건 선택)\n' +
     '• <code>/특전대 내결과</code> — 최근 결과 확인·수정·삭제\n' +
@@ -1262,6 +1305,7 @@ export function registerSida(bot: Telegraf<any>) {
             const f = s.flow?.chatId === ctx.chat.id && fresh ? s.flow : undefined;
             // 입력 중이라도 결과 양식 전체를 붙여넣으면 자동 정리로 시작 (시간 구간 '09:00~12:00' 은 양식 줄로 인식되지 않음)
             if (await handleFreeForm(ctx, text)) return;
+            if (await handleWeekText(ctx, text)) return;
             if (f?.kind === 'avail') return availText(ctx, f, text);
             if (f?.kind === 'result') return setField(ctx, f, text);
             return next();

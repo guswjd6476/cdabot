@@ -1,7 +1,7 @@
 // 순수 로직 테스트 (DB 없음). 실행: npm test
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { buildTimetable, dayStatus, mergeSlots, parseRange, parseRanges, Slot, totalMinutes } from './time';
+import { buildTimetable, dayStatus, mergeSlots, parseRange, parseRanges, parseWeekText, Slot, totalMinutes } from './time';
 import { countBy, missingCount, normalizePhone, parseSlashForms, toCsv, validateField } from './result';
 
 const h = (s: string) => {
@@ -44,6 +44,21 @@ test('시간 입력 형식과 오류', () => {
     assert.match((parseRange('25:00~26:00') as any).error, /없는 시각/);
     assert.match((parseRange('24:30~24:40') as any).error, /없는 시각/);
     assert.match((parseRange('아침') as any).error, /형식/);
+});
+
+test('한 메시지 주간 입력 파싱', () => {
+    const r = parseWeekText('월/09:00-14:00,18:00-21:00 화/12:00-14:00\n수 / 불가 토요일:10~12')!;
+    assert.deepEqual(r.errors, []);
+    assert.deepEqual(r.days, {
+        1: { unavailable: false, slots: [[540, 840], [1080, 1260]] },
+        2: { unavailable: false, slots: [[720, 840]] },
+        3: { unavailable: true, slots: [] },
+        6: { unavailable: false, slots: [[600, 720]] },
+    });
+    assert.deepEqual(parseWeekText('월/9-12 월/13-15')!.errors, ['월요일이 두 번 적혀 있습니다.']);
+    assert.deepEqual(parseWeekText('월/ 화/9-12')!.errors, ['월요일 시간이 비어 있습니다.']);
+    assert.equal(parseWeekText('오늘 9-12 회의'), null); // 요일 표시 없음
+    assert.equal(parseWeekText('발/홍길동/010/20대중'), null);
 });
 
 test('[7] 미제출 / 활동 불가 / 충족 / 미충족 구분', () => {

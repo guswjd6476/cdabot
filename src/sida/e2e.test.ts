@@ -101,7 +101,7 @@ test('[13] 일반 대원은 관리자 전용 기능·데이터를 조회할 수 
 
 test('[1-4][7] 활동 시간 제출 흐름 — 자유 구간, 겹침, 활동 불가, 자정 정책, 최종 확인', async () => {
     assert.match(await send(101, '/특전대 제출'), /받는 주차가 없습니다/);
-    assert.match(await send(ADMIN, '/특전대 주차시작 2026.10.26'), /10\/26~10\/30 주차 활동 시간 취합을 시작/);
+    assert.match(await send(ADMIN, '/특전대 주차시작 2026.10.26'), /10\/26~11\/1 주차 활동 시간 취합을 시작/);
     assert.match(await send(101, '/특전대 제출'), /월요일 10\/26/);
     assert.match(await send(101, '09:00~12:00, 14:00~17:00'), /합계\(겹침 제외\): <b>6시간<\/b> ✅ 충족/);
     assert.match(await send(101, '22:00~02:00'), /자정을 넘는 구간은 지원하지 않으니/);
@@ -119,6 +119,10 @@ test('[1-4][7] 활동 시간 제출 흐름 — 자유 구간, 겹침, 활동 불
     assert.match(await send(101, '13:00~15:00, 19:00~21:00'), /<b>6시간<\/b> ✅/); // 3개 구간
     await press(101, 'sd:av:nx');
     await send(101, '10:00~13:00');
+    assert.match(await press(101, 'sd:av:nx'), /토요일/);
+    await press(101, 'sd:av:un');
+    assert.match(await press(101, 'sd:av:nx'), /일요일/);
+    await press(101, 'sd:av:un');
     const review = await press(101, 'sd:av:nx');
     assert.match(review, /제출 내용 확인/);
     assert.match(review, /주간 활동 가능 시간 합계: <b>20시간<\/b>/); // 6+5+0+6+3
@@ -137,7 +141,7 @@ test('[1-4][7] 활동 시간 제출 흐름 — 자유 구간, 겹침, 활동 불
     assert.match(await send(101, '/특전대 제출'), /불러왔습니다/);
     await press(101, 'sd:av:dl');
     assert.match(await press(101, 'sd:av:di:1'), /<b>3시간<\/b> ⚠️ 미충족/);
-    for (let i = 0; i < 5; i++) await press(101, 'sd:av:nx');
+    for (let i = 0; i < 7; i++) await press(101, 'sd:av:nx');
     assert.match(await press(101, 'sd:av:ok'), /수정 완료/);
     assert.match(await send(101, '/특전대 내현황'), /주간 활동 가능 시간 합계: <b>17시간<\/b>/);
 });
@@ -148,7 +152,7 @@ test('[6][17] 12명 시간표 · 미제출 · 부족시간 · CSV, 시간표와 
         await send(ADMIN, `/특전대 등록 ${200 + i} 대원${String(i).padStart(2, '0')}`);
         if (i > 9) continue; // 대원10, 대원11 은 미제출
         const days: S.WeekDays = {};
-        for (const w of [1, 2, 3, 4, 5]) {
+        for (const w of [1, 2, 3, 4, 5, 6, 7]) {
             const s = 6 + ((i + w) % 6); // 대원마다 다른 시작 시각
             days[w] = i === 5 && w === 2 ? { unavailable: true, slots: [] } : { unavailable: false, slots: [[s * 60, (s + 3) * 60], [(s + 4) * 60, (s + 5 + (i % 4)) * 60]] };
         }
@@ -157,7 +161,7 @@ test('[6][17] 12명 시간표 · 미제출 · 부족시간 · CSV, 시간표와 
     const out = await send(ADMIN, '/특전대 시간표 2026.10.26');
     assert.match(out, /대원 13명 · 제출 10명 · 미제출 3명/); // 12명 + 관리자김
     assert.match(out, /\[월 10\/26\]/);
-    assert.match(out, /\[금 10\/30\]/);
+    assert.match(out, /\[일 11\/1\]/);
     assert.match(out, /대원05: 🚫 활동 불가/);
 
     const snap = (await query(`SELECT data FROM cdabot_schedule_snapshots WHERE period_id = $1 ORDER BY id DESC LIMIT 1;`, [p.id])).rows[0].data;
@@ -171,12 +175,33 @@ test('[6][17] 12명 시간표 · 미제출 · 부족시간 · CSV, 시간표와 
     assert.match(await send(ADMIN, '/특전대 미제출 2026.10.26'), /제출 10\/13명[\s\S]*대원10[\s\S]*대원11/);
     const short = await send(ADMIN, '/특전대 부족시간 2026.10.26');
     assert.match(short, /U101: 월 3시간\(-3시간\), 화 5시간\(-1시간\), 금 3시간/);
-    assert.match(short, /활동 불가로 제출<\/b>\n• U101: 수\n• 대원05: 화/);
+    assert.match(short, /활동 불가로 제출<\/b>\n• U101: 수, 토, 일\n• 대원05: 화/);
 
     await press(ADMIN, `sd:tc:${p.id}`);
     const [tt, personal] = docs();
     assert.ok(tt.startsWith('﻿요일,날짜,시작,종료,인원,활동 가능 대원\r\n월,2026-10-26,'));
-    assert.match(personal, /U101,3,미충족,5,미충족,,활동 불가,6,충족,3,미충족,17\r\n/);
+    assert.match(personal, /U101,3,미충족,5,미충족,,활동 불가,6,충족,3,미충족,,활동 불가,,활동 불가,17\r\n/);
+});
+
+test('한 메시지로 일주일 활동 시간 입력 — 적은 요일만 반영, 처음이면 나머지는 활동 불가', async () => {
+    const p = (await S.getPeriodByWeek(1, '2026-10-26'))!;
+    assert.match(await send(211, '월/09:00-14:00,18:00 화/12:00-14:00'), /월요일: 형식을 알 수 없습니다: "18:00"/); // 끝 시각은 추측하지 않음
+    const review = await send(211, '월/09:00-14:00,18:00-21:00 화/12:00-14:00 수/불가');
+    assert.match(review, /제출 내용 확인/);
+    assert.match(review, /주간 활동 가능 시간 합계: <b>10시간<\/b>/);
+    assert.match(review, /안 적은 요일\(목, 금, 토, 일\): 활동 불가로 표시/);
+    assert.equal((await S.getSubmissions(p.id)).has(await uid(211)), false); // 최종 제출 전에는 저장 안 됨
+    assert.match(await press(211, 'sd:av:ok'), /제출 완료/);
+    const days = (await S.getSubmissions(p.id)).get(await uid(211))!.days;
+    assert.deepEqual(days[1].slots, [[540, 840], [1080, 1260]]);
+    assert.deepEqual([days[3].unavailable, days[7].unavailable], [true, true]);
+    // 다시 보내면 적은 요일만 바뀌고 나머지는 기존 제출 유지
+    assert.match(await send(211, '목/10-16'), /기존 제출 그대로/);
+    await press(211, 'sd:av:ok');
+    const again = (await S.getSubmissions(p.id)).get(await uid(211))!.days;
+    assert.deepEqual([again[1].slots, again[4].slots], [days[1].slots, [[600, 960]]]);
+    assert.equal(await send(211, '월요일에 봐요'), ''); // 일반 대화는 무시
+    await S.saveSubmission(p.id, await uid(211), {}); // 이후 테스트 기준(대원11 미제출) 유지
 });
 
 test('[8][9][11] 발굴건·찾기건 한 줄 양식 — 자동 정리, 빠진 칸만 질문, 중복 방지', async () => {
@@ -370,18 +395,18 @@ test('[18] 새 주차가 지난 주차를 덮어쓰지 않음 · 마감/재개�
     await send(ADMIN, '/특전대 주차시작 2026.11.2');
     assert.doesNotMatch(await send(101, '/특전대 제출'), /불러왔습니다/); // 새 주차는 빈 상태로 시작
     await send(101, '08:00~14:00');
-    for (let i = 0; i < 4; i++) {
+    for (let i = 0; i < 6; i++) {
         await press(101, 'sd:av:nx');
         await press(101, 'sd:av:un');
     }
     await press(101, 'sd:av:nx');
-    assert.match(await press(101, 'sd:av:ok'), /11\/2~11\/6/);
+    assert.match(await press(101, 'sd:av:ok'), /11\/2~11\/8/);
     const p2 = (await S.getPeriodByWeek(1, '2026-11-02'))!;
     assert.equal(JSON.stringify([...(await S.getSubmissions(p1.id)).entries()].map(([k, v]) => [k, v.days])), before1);
     assert.deepEqual((await S.getSubmissions(p2.id)).get(await uid(101))!.days[1].slots, [[480, 840]]);
 
-    assert.match(await send(ADMIN, '/특전대 마감'), /11\/2~11\/6 주차 제출을 마감/);
-    assert.match(await send(ADMIN, '/특전대 마감'), /10\/26~10\/30 주차 제출을 마감/);
+    assert.match(await send(ADMIN, '/특전대 마감'), /11\/2~11\/8 주차 제출을 마감/);
+    assert.match(await send(ADMIN, '/특전대 마감'), /10\/26~11\/1 주차 제출을 마감/);
     assert.match(await send(101, '/특전대 제출'), /받는 주차가 없습니다/);
     await send(ADMIN, '/특전대 수정허용 101');
     assert.match(await send(101, '/특전대 제출'), /11\/2/); // 허용된 사람만 마감 후 수정
