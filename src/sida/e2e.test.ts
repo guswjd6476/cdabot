@@ -9,7 +9,7 @@ import { PGlite } from '@electric-sql/pglite';
 import { Telegraf, Telegram } from 'telegraf';
 import { query, runMigrations, setQueryable } from '../db';
 import { registerCore } from '../core/engine';
-import { createOrg, getMember, getSettings, loadSession, saveSession, setSetting, upsertMembership, upsertUser } from '../core/store';
+import { createOrg, getGroupOrg, getMember, getSettings, loadSession, saveSession, setSetting, upsertMembership, upsertUser } from '../core/store';
 import { nowKst } from '../utils';
 import { registerSida } from './bot';
 import * as S from './store';
@@ -266,8 +266,8 @@ test('[10][12] 결과 수정이 일일 보고서·검색에 반영, 가능 시�
     const ws = nowKst().startOf('day').subtract((nowKst().day() + 6) % 7, 'day');
     const monId = (await S.insertResult({ orgId: 1, userId: await uid(205), kind: 'find', date: ws.format('YYYY-MM-DD'), values: { name: '월요일' }, dedupKey: 't:mon' }))!;
     const day = await send(ADMIN, '/특전대 오늘현황');
-    assert.match(day, /1\. 당일 결과<\/b> — 총 4건 \(발 3건 · 찾 1건\)\n• U101: 발 3건 · 찾 1건\n• 0건: /); // 대원별
-    assert.match(day, /2\. 이번 주 누적<\/b> \(.*\) — 총 5건 \(발 3건 · 찾 2건\)\n• U101: 발 3건 · 찾 1건\n• 대원05: 발 0건 · 찾 1건/);
+    assert.match(day, /1\. 당일 결과<\/b> — 총 4건 \(발 3건 \(만남확정 2건\) · 찾 1건\)\n• U101: 발 3건 \(만남확정 2건\) · 찾 1건\n• 0건: /); // 대원별, 2차 만남 일시가 있는 발굴 = 만남확정
+    assert.match(day, /2\. 이번 주 누적<\/b> \(.*\) — 총 5건 \(발 3건 \(만남확정 2건\) · 찾 2건\)\n• U101: 발 3건 \(만남확정 2건\) · 찾 1건\n• 대원05: 발 0건 · 찾 1건/);
     if (ws.format('YYYY-MM-DD') !== nowKst().format('YYYY-MM-DD')) assert.match(day, /3\. 요일별<\/b>\n• 월 .*: 발 0건 · 찾 1건/);
     await S.deleteResult(1, monId);
     assert.match(day, /<b>발굴건<\/b> 3건[\s\S]*<b>찾기건<\/b> 1건\n• 인도지역: 대전 1/);
@@ -330,7 +330,7 @@ test('단체방(대원) / 1:1 대화(관리자) — 장소 안내, 남의 버튼
     assert.match(await press(205, 'sd:rs:ok~205'), /저장 완료/);
     const mine = await send(205, '/특전대 내결과');
     assert.ok(!mine.includes('010-5555-6666'), '단체방 내 결과 목록은 연락처 가림');
-    assert.match(mine, /내 결과<\/b> 최근 7일 — 총 \d+건 \(발 \d+건 · 찾 \d+건\)\n\n<b>\d+\/\d+ \(.\)<\/b> 발 \d+건 · 찾 \d+건\n#\d+ 발\/방\*수\/🔒\/30대\/남\/광주\/3팀\/김\/책\/\+10\.31 14시,광주역/);
+    assert.match(mine, /내 결과<\/b> 최근 7일 — 총 \d+건 \(발 \d+건 \(만남확정 1건\) · 찾 \d+건\)\n\n<b>\d+\/\d+ \(.\)<\/b> 발 \d+건 \(만남확정 1건\) · 찾 \d+건\n#\d+ 발\/방\*수\/🔒\/30대\/남\/광주\/3팀\/김\/책\/\+10\.31 14시,광주역/);
 
     // 30분 넘게 방치된 입력은 단체방 대화를 먹지 않음
     await send(205, '/특전대 결과');
@@ -367,6 +367,24 @@ test('등록된 단체방에서는 가입 요청 없이 자동 대원 등록', a
     const m = (await getMember(1, S.MODULE_KEY, { telegramId: '808' }))!;
     assert.equal(m.status, 'active');
     assert.deepEqual(m.perms, ['member']); // 관리자 권한은 자동으로 주지 않음
+
+    assert.equal(await send(828, '안녕하세요 오늘 화이팅', ++messageId, ROOM), ''); // 일반 대화엔 답하지 않지만
+    assert.equal((await getMember(1, S.MODULE_KEY, { telegramId: '828' }))?.status, 'active'); // 대원으로 등록됨
+
+    // 주제(토픽)를 켜면 텔레그램이 방 ID를 바꿈 → 등록·현황판이 새 ID로 옮겨감
+    const NEW_ROOM = -1007770001;
+    await setSetting(1, S.MODULE_KEY, 'board', { chatId: ROOM, threadId: 3 });
+    calls = [];
+    await bot.handleUpdate({ update_id: ++updateId, message: { message_id: ++messageId, date: Math.floor(Date.now() / 1000), chat: { id: NEW_ROOM, type: 'supergroup' }, from: user(ADMIN), migrate_from_chat_id: ROOM } } as any);
+    assert.equal(await getGroupOrg(NEW_ROOM, S.MODULE_KEY), 1);
+    assert.equal(await getGroupOrg(ROOM, S.MODULE_KEY), undefined);
+    assert.equal((await getSettings(1, S.MODULE_KEY)).board.chatId, NEW_ROOM);
+    await setSetting(1, S.MODULE_KEY, 'board', null);
+    assert.equal(await send(838, '새 방에서 첫 대화', ++messageId, NEW_ROOM), '');
+    assert.equal((await getMember(1, S.MODULE_KEY, { telegramId: '838' }))?.status, 'active');
+    await send(ADMIN, '/특전대 방해제', ++messageId, NEW_ROOM);
+    await send(ADMIN, '/특전대 방등록', ++messageId, ROOM);
+    for (const id of ['828', '838']) await send(ADMIN, `/특전대 비활성 ${id}`); // 다음 테스트 인원 수에 영향 없게
 
     await send(ADMIN, '/특전대 비활성 808');
     assert.match(await send(808, '/특전대', ++messageId, ROOM), /비활성화된 계정/); // 비활성화는 되살아나지 않음
@@ -434,8 +452,8 @@ test('주제방 현황판 — 한 메시지를 계속 갱신, 날짜 바뀌면 �
     assert.equal(posted.find((c) => c.method === 'sendMessage')!.payload.message_thread_id, 9);
     const edit = posted.find((c) => c.method === 'editMessageText')!;
     assert.deepEqual([edit.payload.chat_id, edit.payload.message_id], [ROOM, board.messageId]);
-    assert.match(edit.payload.text, /당일 결과<\/b> — 총 \d+건[^\n]*[\s\S]*• U101: 발 \d+건 · 찾 \d+건/);
-    assert.match(edit.payload.text, /📋 오늘 올라온 결과<\/b>[\s\S]*<b>U101<\/b> 발 \d+건 · 찾 \d+건\n[\s\S]*발\/주\*\/🔒\/30대\/{5}\n발\/주\*2\/🔒\/30대/); // 올린 양식 그대로, 이름 가림·연락처 🔒
+    assert.match(edit.payload.text, /당일 결과<\/b> — 총 \d+건[^\n]*[\s\S]*• U101: 발 \d+건[^\n]* · 찾 \d+건/);
+    assert.match(edit.payload.text, /📋 오늘 올라온 결과<\/b>[\s\S]*<b>U101<\/b> 발 \d+건[^\n]* · 찾 \d+건\n[\s\S]*발\/주\*\/🔒\/30대\/{5}\n발\/주\*2\/🔒\/30대/); // 올린 양식 그대로, 이름 가림·연락처 🔒
     assert.ok(!edit.payload.text.includes('5678'));
 
     await setSetting(1, S.MODULE_KEY, 'board', { ...board, date: '2000-01-01' }); // 날짜가 바뀐 것처럼

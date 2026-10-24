@@ -89,6 +89,16 @@ export async function getGroupOrg(chatId: number, moduleKey: string): Promise<nu
     return (await query(`SELECT org_id FROM cdabot_group_chats WHERE chat_id = $1 AND module_key = $2;`, [String(chatId), moduleKey])).rows[0]?.org_id;
 }
 
+// 일반 그룹이 슈퍼그룹으로 바뀌면(주제 켜기 등) 텔레그램이 방 ID를 바꿈 → 등록을 새 ID로 옮김
+export async function moveGroupChat(oldId: number, newId: number) {
+    await query(`UPDATE cdabot_group_chats SET chat_id = $2 WHERE chat_id = $1;`, [String(oldId), String(newId)]);
+    await query(
+        `UPDATE cdabot_modules SET settings = jsonb_set(settings, '{board,chatId}', to_jsonb($2::bigint))
+         WHERE settings->'board'->>'chatId' = $1;`,
+        [String(oldId), String(newId)]
+    );
+}
+
 export async function listGroupChats(orgId: number, moduleKey: string): Promise<string[]> {
     return (await query(`SELECT chat_id::text AS id FROM cdabot_group_chats WHERE org_id = $1 AND module_key = $2;`, [orgId, moduleKey])).rows.map((r) => r.id);
 }

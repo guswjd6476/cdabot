@@ -2,7 +2,7 @@
 // 모든 기능은 봇과의 1:1 대화에서만 동작 (단체방에 개인정보가 올라가지 않게)
 import { Markup, Telegraf } from 'telegraf';
 import { Access, askOrg, hasPerm, Need, notifyManagers, registerModule, resolveAccess, session } from '../core/engine';
-import { audit, autoEnroll, getGroupOrg, listGroupChats, getMember, setGroupOrg, getSettings, listMembers, listOrgs, Membership, Perm, PERMS, setSetting, updateMembership, upsertMembership, upsertUser } from '../core/store';
+import { audit, autoEnroll, getGroupOrg, listGroupChats, moveGroupChat, getMember, setGroupOrg, getSettings, listMembers, listOrgs, Membership, Perm, PERMS, setSetting, updateMembership, upsertMembership, upsertUser } from '../core/store';
 import { dayjs, escapeHtml, getErrorMessage, nowKst, parseFlexibleDate, replyLong, splitLongMessage } from '../utils';
 import * as T from './time';
 import * as R from './result';
@@ -713,7 +713,12 @@ async function todayReport(ctx: Ctx, a: A, args: string) {
     await show(ctx, `${html}\n\n<b>6. 당일 항목별 집계</b>\n${resultStats(results)}`, buttons);
 }
 
-const kindCount = (rows: S.ResultRow[]) => `발 ${rows.filter((r) => r.kind === 'dig').length}건 · 찾 ${rows.filter((r) => r.kind === 'find').length}건`;
+// 만남확정 = 2차 만남 일시가 적힌 발굴건 (발굴 건수에 포함, 따로 한 번 더 표시)
+const isMeetConfirmed = (r: S.ResultRow) => r.kind === 'dig' && !!r.meet_at;
+function kindCount(rows: S.ResultRow[]) {
+    const met = rows.filter(isMeetConfirmed).length;
+    return `발 ${rows.filter((r) => r.kind === 'dig').length}건${met ? ` (만남확정 ${met}건)` : ''} · 찾 ${rows.filter((r) => r.kind === 'find').length}건`;
+}
 
 // 대원별 '이름: 발 n건 · 찾 n건' (많은 순)
 function perPerson(rows: S.ResultRow[], members: Membership[]) {
@@ -829,7 +834,8 @@ function resultStats(rows: S.ResultRow[]): string {
     const lines: string[] = [];
     for (const kind of ['dig', 'find'] as R.FormKind[]) {
         const mine = rows.filter((r) => r.kind === kind);
-        lines.push(`<b>${R.FORMS[kind].label}</b> ${mine.length}건`);
+        const met = mine.filter(isMeetConfirmed).length;
+        lines.push(`<b>${R.FORMS[kind].label}</b> ${mine.length}건${kind === 'dig' ? ` (만남확정 ${met}건)` : ''}`);
         if (!mine.length) continue;
         for (const k of STAT_FIELDS[kind]) {
             lines.push(
@@ -1232,6 +1238,26 @@ async function help(ctx: Ctx, a: A) {
 
 export function registerSida(bot: Telegraf<any>) {
     registerModule({ key: MK, name: NAME, openMenu: (ctx) => dispatch(ctx), help: HELP_MEMBER });
+
+    // 등록된 단체방에서는 명령어가 아닌 일반 대화만 써도 대원으로 자동 등록 (같은 사람은 10분에 한 번만 DB 확인)
+    const seen = new Map<string, number>();
+    bot.on('message', async (ctx: Ctx, next: () => Promise<void>) => {
+        const m = ctx.message;
+        try {
+            if (m.migrate_from_chat_id) {
+                await moveGroupChat(m.migrate_from_chat_id, ctx.chat.id);
+                console.log(`[방 ID 변경] ${m.migrate_from_chat_id} → ${ctx.chat.id} 등록 이전`);
+            }
+            const key = `${ctx.chat.id}:${ctx.from?.id}`;
+            if (!inPrivate(ctx) && ctx.from && !ctx.from.is_bot && Date.now() - (seen.get(key) || 0) > 10 * 60 * 1000) {
+                seen.set(key, Date.now());
+                await access(ctx);
+            }
+        } catch (err) {
+            console.error('[자동 등록 실패]:', getErrorMessage(err));
+        }
+        return next();
+    });
 
     const run = (fn: (ctx: Ctx, next: () => Promise<void>) => Promise<unknown>) => async (ctx: Ctx, next: () => Promise<void>) => {
         try {
