@@ -601,8 +601,9 @@ async function handleFreeForm(ctx: Ctx, text: string): Promise<boolean> {
 // 올린 양식 그대로 한 줄 (발/이름/…). pii=false 면 이름 가림·연락처/생년월일 🔒
 function formLine(r: S.ResultRow, pii: boolean) {
     const cell = (k: R.FieldKey) => (r[k] ? piiCell(k, r[k]!, !pii) : '');
-    if (r.kind === 'find') return `찾/${R.FORMS.find.fields.map(cell).join('/')}`;
-    const main = R.FORMS.dig.fields.slice(0, 8).map(cell).join('/');
+    const trim = (x: string) => x.replace(/\/+$/, ''); // 뒤쪽 빈 칸의 '/' 는 빼서 올린 모양 그대로
+    if (r.kind === 'find') return trim(`찾/${R.FORMS.find.fields.map(cell).join('/')}`);
+    const main = trim(R.FORMS.dig.fields.slice(0, 8).map(cell).join('/'));
     return `발/${main}${r.meet_at || r.meet_place ? `/+${cell('meet_at')},${cell('meet_place')}` : ''}`;
 }
 
@@ -779,10 +780,11 @@ async function refreshBoard(telegram: Telegraf['telegram'], orgId: number) {
     const b: Board | null = (await getSettings(orgId, MK)).board;
     if (!b) return;
     const date = today();
-    const { html: today_, results, members } = await todayHtml(orgId, date);
-    let html = `📌 <b>실시간 현황판</b> — 제출될 때마다 자동 갱신\n\n${today_}\n\n${boardList(results, members, 3900 - today_.length)}`;
-    // 텔레그램 한 메시지 4096자 제한 → 줄 단위로 자름 (태그가 줄 안에서 닫히므로 줄 경계는 안전)
-    if (html.length > 4000) html = html.slice(0, html.lastIndexOf('\n', 3900)) + '\n…(길어서 생략 — 전체는 관리자 /특전대 오늘현황)';
+    const { html: today_, results } = await todayHtml(orgId, date);
+    let top = `📌 <b>실시간 현황판</b> — 제출될 때마다 자동 갱신\n\n${today_}`;
+    // 텔레그램 한 메시지 4096자 제한 → 현황은 줄 단위로 자르고(태그가 줄 안에서 닫힘), 결과 목록은 남은 만큼만
+    if (top.length > 3000) top = top.slice(0, top.lastIndexOf('\n', 3000)) + '\n…(길어서 생략 — 전체는 관리자 /특전대 오늘현황)';
+    const html = `${top}\n\n${boardList(results, 4000 - top.length)}`;
     if (b.messageId && b.date === date) {
         try {
             await telegram.editMessageText(b.chatId, b.messageId, undefined, html, { parse_mode: 'HTML' });
@@ -794,21 +796,20 @@ async function refreshBoard(telegram: Telegraf['telegram'], orgId: number) {
     const m = await telegram.sendMessage(b.chatId, html, { parse_mode: 'HTML', message_thread_id: b.threadId });
     await setSetting(orgId, MK, 'board', { ...b, date, messageId: m.message_id });
 }
-// 현황판: 오늘 올라온 결과를 대원별로 모아 올린 양식 그대로
-function boardList(results: S.ResultRow[], members: Membership[], budget: number) {
-    if (!results.length) return '<b>📋 오늘 올라온 결과</b>\n• 아직 없습니다.';
-    const names = new Map(members.map((m) => [m.user_id, m.display_name]));
-    const by = new Map<number, S.ResultRow[]>();
-    for (const r of [...results].reverse()) by.set(r.user_id, [...(by.get(r.user_id) || []), r]); // 올린 순서대로
-    let out = '<b>📋 오늘 올라온 결과</b>';
-    let shown = 0;
-    for (const [uid, rs] of by) {
-        const block = `\n\n<b>${e(names.get(uid) || rs[0].submitter || '?')}</b> ${kindCount(rs)}\n${rs.map((r) => formLine(r, true)).join('\n')}`;
-        if (out.length + block.length > budget) break;
-        out += block;
-        shown += rs.length;
+// 현황판: 오늘 올라온 결과를 올라온 순서대로 한 줄씩. 코드 블록이라 눌러서 통째로 복사됨
+function boardList(results: S.ResultRow[], budget: number) {
+    const title = `<b>📋 오늘 올라온 결과</b> ${results.length}건 (눌러서 복사)`;
+    if (!results.length) return `${title}\n• 아직 없습니다.`;
+    const lines: string[] = [];
+    let size = title.length + 30;
+    for (const r of [...results].reverse()) {
+        const line = formLine(r, true);
+        if (size + line.length + 1 > budget) break;
+        lines.push(line);
+        size += line.length + 1;
     }
-    return shown < results.length ? `${out}\n\n…외 ${results.length - shown}건 (전체는 관리자 /특전대 오늘현황)` : out;
+    const more = results.length - lines.length;
+    return `${title}\n<pre>${lines.join('\n')}</pre>${more ? `\n…외 ${more}건 (전체는 관리자 /특전대 오늘현황)` : ''}`;
 }
 
 const touchBoard = (ctx: Ctx, orgId: number) => refreshBoard(ctx.telegram, orgId).catch((err) => console.error('[현황판 갱신 실패]:', getErrorMessage(err)));
