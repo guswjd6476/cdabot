@@ -11,7 +11,9 @@ import { query, runMigrations, setQueryable } from '../db';
 import { registerCore } from '../core/engine';
 import { createOrg, getMember, loadSession, saveSession, upsertMembership, upsertUser } from '../core/store';
 import { nowKst } from '../utils';
-import { registerSida } from './bot';
+import { appApi, registerSida } from './bot';
+import { verifyInitData } from './webapp';
+import { createHmac } from 'crypto';
 import * as S from './store';
 
 const ADMIN = 9000; // test-setup 의 ADMIN_IDS
@@ -24,6 +26,7 @@ let calls: Call[] = [];
     calls.push({ method, payload });
     if (method === 'getMe') return { id: 1, is_bot: true, first_name: 'sida', username: 'sidabot' };
     if (method === 'answerCallbackQuery') return true;
+    if (method === 'getChatMember') return { status: payload.user_id === 952 ? 'left' : 'member' };
     return { message_id: calls.length, date: 0, chat: { id: payload.chat_id, type: 'private' }, text: payload.text };
 };
 
@@ -367,6 +370,53 @@ test('등록된 단체방에서는 가입 요청 없이 자동 대원 등록', a
     assert.match(await send(ADMIN, '/특전대 방해제', ++messageId, ROOM), /해제/);
     assert.match(await send(919, '/특전대', ++messageId, ROOM), /등록되어 있지 않습니다/);
     await send(ADMIN, '/특전대 비활성 707'); // 다음 테스트 인원 수에 영향 없게
+});
+
+test('미니앱 입력 창 — 텔레그램 서명 확인, 단체방 사람만, 보이는 그대로 저장', async () => {
+    // 서명 확인: 맞는 서명만 통과, 값을 바꾸면 거절
+    const sign = (fields: Record<string, string>, token = '1:TEST') => {
+        const check = Object.keys(fields).sort().map((k) => `${k}=${fields[k]}`).join('\n');
+        const hash = createHmac('sha256', createHmac('sha256', 'WebAppData').update(token).digest()).update(check).digest('hex');
+        return new URLSearchParams({ ...fields, hash }).toString();
+    };
+    const fields = { auth_date: String(Math.floor(Date.now() / 1000)), user: JSON.stringify({ id: 951, first_name: '앱' }), start_param: 'g-100888' };
+    assert.equal(verifyInitData(sign(fields), '1:TEST')!.user.id, 951);
+    assert.equal(verifyInitData(sign(fields).replace('951', '952'), '1:TEST'), null);
+    assert.equal(verifyInitData(sign(fields, '2:OTHER'), '1:TEST'), null);
+    assert.equal(verifyInitData(sign({ ...fields, auth_date: '1000' }), '1:TEST'), null); // 오래된 서명
+
+    const ROOM = -100888;
+    const tg = bot.telegram;
+    assert.match((await appApi(tg, { id: 951 }, 'g-100888')).error!, /단체방의 버튼/); // 등록 안 된 방
+    await send(ADMIN, '/특전대 방등록', ++messageId, ROOM);
+    process.env.MINIAPP_URL = 'https://t.me/sidabot/time';
+    try {
+        await send(951, '/특전대 제출', ++messageId, ROOM);
+        const url = calls.flatMap((c) => c.payload?.reply_markup?.inline_keyboard?.flat() ?? []).find((b: any) => b.url)?.url;
+        assert.equal(url, 'https://t.me/sidabot/time?startapp=g-100888');
+        assert.match(await press(951, 'sd:a:채팅제출~951', ROOM), /월요일/); // 채팅 입력도 그대로 가능
+    } finally {
+        delete process.env.MINIAPP_URL;
+    }
+    assert.match((await appApi(tg, { id: 952 }, 'g-100888')).error!, /대원만/); // 링크만 알고 단체방에 없는 사람
+    assert.equal(await getMember(1, S.MODULE_KEY, { telegramId: '952' }), undefined);
+
+    const load = await appApi(tg, { id: 951, first_name: '앱' }, 'g-100888');
+    assert.deepEqual([load.week, load.text], ['10/26~11/1', '']);
+    assert.match((await appApi(tg, { id: 951 }, 'g-100888', '월/12-14,18')).error!, /월요일: 형식/);
+    const saved = await appApi(tg, { id: 951 }, 'g-100888', '월/12-14,18-20\n화/15-18,19-21\n수/불가\n목/11-19\n금/11-20\n토/10-20');
+    assert.equal(saved.done, '제출');
+    assert.match(saved.html!, /주간 활동 가능 시간 합계: <b>36시간<\/b>/); // 4+5+0+8+9+10, 일요일은 불가
+    const p = (await S.getPeriodByWeek(1, '2026-10-26'))!;
+    const days = (await S.getSubmissions(p.id)).get((await getMember(1, S.MODULE_KEY, { telegramId: '951' }))!.user_id)!.days;
+    assert.deepEqual([days[1].slots, days[3].unavailable, days[7].unavailable], [[[720, 840], [1080, 1200]], true, true]);
+    // 다시 열면 제출한 내용이 채워져 있고, 그대로 다시 저장해도 같음
+    const again = await appApi(tg, { id: 951 }, 'g-100888');
+    assert.match(again.text!, /^월\/12:00-14:00,18:00-20:00\n화\/15:00-18:00,19:00-21:00\n수\/불가/);
+    assert.equal((await appApi(tg, { id: 951 }, 'g-100888', again.text)).done, '수정');
+
+    await send(ADMIN, '/특전대 방해제', ++messageId, ROOM);
+    await send(ADMIN, '/특전대 비활성 951');
 });
 
 test('[14] 조직별 데이터 분리', async () => {

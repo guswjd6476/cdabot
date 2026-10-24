@@ -13,7 +13,7 @@ const MK = S.MODULE_KEY;
 const btn = Markup.button.callback;
 type Ctx = any;
 type A = Access & { org: { id: number; name: string } };
-type Buttons = ReturnType<typeof btn>[][];
+type Buttons = (ReturnType<typeof btn> | ReturnType<typeof Markup.button.url>)[][];
 
 const PERM_LABEL: Record<Perm, string> = { member: '대원', manager: '팀 관리자', pii: '개인정보 조회' };
 const e = escapeHtml;
@@ -134,6 +134,7 @@ async function access(ctx: Ctx): Promise<Access> {
 
 const ACTIONS: Record<string, Action> = {
     제출: { label: '📝 활동 시간 제출', need: 'member', run: startAvail },
+    채팅제출: { need: 'member', run: (ctx, a) => startAvail(ctx, a, '채팅') },
     내현황: { label: '📊 내 활동 현황', need: 'member', run: myStatus },
     결과: { label: '✍️ 오늘 결과 제출', need: 'member', run: (ctx, a) => startResult(ctx, a) },
     내결과: { label: '📄 내 결과 확인', need: 'member', run: myResults },
@@ -279,7 +280,14 @@ interface AvailFlow {
     review?: boolean;
 }
 
-async function startAvail(ctx: Ctx, a: A) {
+async function startAvail(ctx: Ctx, a: A, args = '') {
+    // 미니앱이 설정돼 있으면 단체방에서는 입력 창(미니앱)으로 — 대화에 시간 입력이 섞이지 않게
+    const app = process.env.MINIAPP_URL;
+    if (app && !inPrivate(ctx) && args !== '채팅')
+        return show(ctx, '📝 아래 버튼을 누르면 활동 시간 입력 창이 열립니다.\n입력한 내용은 단체방 대화에 올라가지 않습니다.', [
+            [Markup.button.url('📝 활동 시간 입력 창 열기', `${app}?startapp=g${ctx.chat.id}`)],
+            [btn('💬 채팅으로 입력', 'sd:a:채팅제출')],
+        ]);
     const p = await S.getEditablePeriod(a.org.id, a.userId);
     if (!p) return void (await ctx.reply('⏳ 지금은 활동 시간을 받는 주차가 없습니다 (마감되었거나 시작 전). 관리자에게 문의해주세요.'));
     const [existing, settings] = await Promise.all([S.getSubmissions(p.id).then((m) => m.get(a.userId)), getSettings(a.org.id, MK)]);
@@ -653,6 +661,37 @@ async function resultCb(ctx: Ctx, a: A, s: Record<string, any>, arg: string) {
             return show(ctx, '✖ 결과 입력을 취소했습니다.');
     }
     await askNext(ctx, f);
+}
+
+// 미니앱 입력 창 API. text 없으면 불러오기, 있으면 저장 (입력 창에 보이는 그대로 저장 — 안 적은 요일은 활동 불가)
+// from 과 startParam 은 webapp.ts 에서 텔레그램 서명을 확인한 값
+export async function appApi(telegram: Telegraf['telegram'], from: { id: number; first_name?: string; last_name?: string }, startParam: string, text?: string) {
+    const chatId = Number(/^g(-\d+)$/.exec(startParam)?.[1]);
+    const orgId = chatId ? await getGroupOrg(chatId, MK) : undefined;
+    if (!orgId) return { error: '특전대 단체방의 버튼으로 열어주세요.' };
+    const name = [from.first_name, from.last_name].filter(Boolean).join(' ') || String(from.id);
+    const user = await upsertUser(from.id, name);
+    let m = await getMember(orgId, MK, { telegramId: String(from.id) });
+    if (m?.status !== 'active') {
+        // 링크만 알아서는 등록되지 않도록, 실제 단체방 사람인지 텔레그램에 확인한 뒤 자동 등록
+        const cm: any = await telegram.getChatMember(chatId, from.id).catch(() => null);
+        if (!cm || !(['creator', 'administrator', 'member'].includes(cm.status) || cm.is_member)) return { error: '특전대 단체방 대원만 사용할 수 있습니다.' };
+        if (await autoEnroll(orgId, user.id, MK, name)) await audit(orgId, user.id, 'member.auto_enroll', chatId);
+        m = await getMember(orgId, MK, { telegramId: String(from.id) });
+        if (m?.status !== 'active') return { error: '대원 등록이 비활성 상태입니다. 관리자에게 문의해주세요.' };
+    }
+    const p = await S.getEditablePeriod(orgId, user.id);
+    if (!p) return { error: '⏳ 지금은 활동 시간을 받는 주차가 없습니다 (마감되었거나 시작 전). 관리자에게 문의해주세요.' };
+    const [existing, settings] = await Promise.all([S.getSubmissions(p.id).then((x) => x.get(user.id)), getSettings(orgId, MK)]);
+    const week = weekLabel(p.week_start);
+    if (text === undefined) return { week, name: m.display_name, text: existing ? T.weekToText(existing.days) : '' };
+    const parsed = T.parseWeekText(text);
+    if (!parsed) return { error: '요일/시간 형식으로 적어주세요. 예: 월/12-14,18-20' };
+    if (parsed.errors.length) return { error: parsed.errors.join('\n') };
+    const days: S.WeekDays = Object.fromEntries(T.WEEKDAYS.map((w) => [w, parsed.days[w] ?? { unavailable: true, slots: [] }]));
+    await S.saveSubmission(p.id, user.id, days);
+    await audit(orgId, user.id, existing ? 'avail.update' : 'avail.submit', p.id, days);
+    return { week, done: existing ? '수정' : '제출', html: renderPersonWeek(p.week_start, days, Number(settings.min_minutes) || T.DEFAULT_MIN_MINUTES) };
 }
 
 // 단체방에 '월/09:00-14:00 화/…' → 확인 화면 (최종 제출 버튼으로 저장)
