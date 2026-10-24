@@ -204,7 +204,7 @@ test('[8][9][11] 발굴건·찾기건 한 줄 양식 — 자동 정리, 빠진 �
         5100
     );
     assert.match(bulk, /결과 3건 저장/);
-    assert.match(bulk, /1번째 줄 테\*트 — ⚠️ 빈 칸 2개/); // 연락처 뒷자리 4자리 OK, 2차 만남 빈 칸
+    assert.match(bulk, /#\d+ 발굴건 1번째 줄 테\*트\n/); // 연락처 뒷자리 4자리 OK, 2차 만남은 없어도 빈 칸 아님
     assert.match(bulk, /중복 제외 2건[\s\S]*4번째 줄 홍\*동\n5번째 줄 테\*\*2/);
     assert.ok(!bulk.includes('1234'), '단체방 답장에 연락처 안 보임');
     const added: S.ResultRow[] = (await S.listResults(1)).filter((r) => r.name?.startsWith('테스트'));
@@ -221,15 +221,13 @@ test('[8][9][11] 발굴건·찾기건 한 줄 양식 — 자동 정리, 빠진 �
 
     const r2 = await send(101, '발/김영희//25살/여/부산');
     assert.match(r2, /생년 구분은 .* 중에서 선택/); // 허용 밖 값은 확인
-    assert.match(r2, /연락처, 생년 구분, 인도팀, 인도자, 도구, 2차 만남 일시, 2차 만남 장소/); // 빠진 칸만 (추측 없음)
+    assert.match(r2, /연락처, 생년 구분, 인도팀, 인도자, 도구$/m); // 빠진 칸만 (추측 없음, 2차 만남은 선택이라 안 물음)
     assert.match(await send(101, '12'), /연락처 형식을 확인/);
     assert.match(await send(101, '010-2222-3333'), /생년 구분/);
     assert.match(await press(101, 'sd:rs:pick:1'), /인도팀/);
     await press(101, 'sd:rs:skip');
     await press(101, 'sd:rs:skip');
-    assert.match(await send(101, '책자'), /2차 만남 일시/);
-    await press(101, 'sd:rs:skip');
-    const review = await press(101, 'sd:rs:skip');
+    const review = await send(101, '책자');
     assert.match(review, /3\. 생년 구분: 20대 중/);
     assert.match(review, /6\. 인도팀: <i>\(미입력\)<\/i>/);
     await press(101, 'sd:rs:ok');
@@ -330,7 +328,9 @@ test('단체방(대원) / 1:1 대화(관리자) — 장소 안내, 남의 버튼
     // 단체방 자유 형식 결과 → 저장
     assert.match(await send(205, '발/방철수/010-5555-6666/30대/남/광주/3팀/김/책/10.31 14시,광주역'), /결과 확인/);
     assert.match(await press(205, 'sd:rs:ok~205'), /저장 완료/);
-    assert.ok(!(await send(205, '/특전대 내결과')).includes('010-5555-6666'), '단체방 내 결과 목록은 연락처 가림');
+    const mine = await send(205, '/특전대 내결과');
+    assert.ok(!mine.includes('010-5555-6666'), '단체방 내 결과 목록은 연락처 가림');
+    assert.match(mine, /내 결과<\/b> 최근 7일 — 총 \d+건 \(발 \d+건 · 찾 \d+건\)\n\n<b>\d+\/\d+ \(.\)<\/b> 발 \d+건 · 찾 \d+건\n#\d+ 발\/방\*수\/🔒\/30대\/남\/광주\/3팀\/김\/책\/\+10\.31 14시,광주역/);
 
     // 30분 넘게 방치된 입력은 단체방 대화를 먹지 않음
     await send(205, '/특전대 결과');
@@ -435,6 +435,8 @@ test('주제방 현황판 — 한 메시지를 계속 갱신, 날짜 바뀌면 �
     const edit = posted.find((c) => c.method === 'editMessageText')!;
     assert.deepEqual([edit.payload.chat_id, edit.payload.message_id], [ROOM, board.messageId]);
     assert.match(edit.payload.text, /당일 결과<\/b> — 총 \d+건[^\n]*[\s\S]*• U101: 발 \d+건 · 찾 \d+건/);
+    assert.match(edit.payload.text, /📋 오늘 올라온 결과<\/b>[\s\S]*<b>U101<\/b> 발 \d+건 · 찾 \d+건\n[\s\S]*발\/주\*\/🔒\/30대\/{5}\n발\/주\*2\/🔒\/30대/); // 올린 양식 그대로, 이름 가림·연락처 🔒
+    assert.ok(!edit.payload.text.includes('5678'));
 
     await setSetting(1, S.MODULE_KEY, 'board', { ...board, date: '2000-01-01' }); // 날짜가 바뀐 것처럼
     const next = await topic(101, '/활동시간 일/10-12', 9);

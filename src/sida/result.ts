@@ -43,6 +43,8 @@ export const AGE_GROUPS = ['20대 초', '20대 중', '20대 후', '30대', '모�
 // 관리자가 목록을 관리하는 항목 (gender 는 목록 밖 값이면 다시 확인, 나머지는 직접 입력 허용)
 export const OPTION_FIELDS: FieldKey[] = ['gender', 'region', 'team', 'guide', 'tool'];
 export const PII_FIELDS: FieldKey[] = ['name', 'phone', 'birth_date'];
+// 없는 경우가 많아 비어 있어도 '빈 칸'으로 세지 않고, 한 줄 양식에서 빠져도 다시 묻지 않음
+export const OPTIONAL_FIELDS: FieldKey[] = ['meet_at', 'meet_place'];
 
 const squash = (s: string) => s.normalize('NFKC').replace(/\s+/g, '');
 
@@ -138,7 +140,7 @@ export function countBy<T extends Record<string, any>>(rows: T[], key: keyof T):
     return [...m.entries()].sort((a, b) => (a[0] === '(미입력)' ? 1 : b[0] === '(미입력)' ? -1 : b[1] - a[1]));
 }
 
-export const missingCount = (r: Record<string, any>) => FORMS[formOf(r.kind)].fields.filter((k) => !r[k]).length;
+export const missingCount = (r: Record<string, any>) => FORMS[formOf(r.kind)].fields.filter((k) => !r[k] && !OPTIONAL_FIELDS.includes(k)).length;
 
 // 엑셀에서 한글이 깨지지 않도록 UTF-8 BOM + CRLF. 수식 주입(=,+,@ 로 시작) 방지
 export function toCsv(header: string[], rows: (string | number | null | undefined)[][]): Buffer {

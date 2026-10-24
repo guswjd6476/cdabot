@@ -328,7 +328,7 @@ async function startResult(ctx: Ctx, a: A, init?: R.ParsedForm & { dedupKey: str
         date: today(),
         form: init?.kind,
         values,
-        queue: init ? R.FORMS[init.kind].fields.filter((k) => values[k] === undefined) : [],
+        queue: init ? R.FORMS[init.kind].fields.filter((k) => values[k] === undefined && !R.OPTIONAL_FIELDS.includes(k)) : [],
         dedupKey: init?.dedupKey ?? `f:${a.userId}:${Date.now()}:${Math.random().toString(36).slice(2, 8)}`,
     };
     (await session(ctx)).flow = f;
@@ -598,6 +598,14 @@ async function handleFreeForm(ctx: Ctx, text: string): Promise<boolean> {
     return true;
 }
 
+// 올린 양식 그대로 한 줄 (발/이름/…). 개인정보 권한이 없거나 단체방이면 이름 가림·연락처/생년월일 🔒
+function formLine(r: S.ResultRow, pii: boolean) {
+    const cell = (k: R.FieldKey) => (r[k] ? piiCell(k, r[k]!, !pii) : '');
+    if (r.kind === 'find') return `찾/${R.FORMS.find.fields.map(cell).join('/')}`;
+    const main = R.FORMS.dig.fields.slice(0, 8).map(cell).join('/');
+    return `발/${main}${r.meet_at || r.meet_place ? `/+${cell('meet_at')},${cell('meet_place')}` : ''}`;
+}
+
 function resultLine(r: S.ResultRow, pii: boolean) {
     const v = (k: R.FieldKey) => (r[k] ? piiCell(k, r[k]!, !pii) : '-');
     const head = `#${r.id} ${r.activity_date.slice(5)} [${r.submitter ? e(r.submitter) : '-'}]`;
@@ -609,7 +617,12 @@ function resultLine(r: S.ResultRow, pii: boolean) {
 async function myResults(ctx: Ctx, a: A) {
     const rows = (await S.listResults(a.org.id, { userId: a.userId, from: dayjs(today()).subtract(6, 'day').format('YYYY-MM-DD') })).slice(0, 30);
     if (!rows.length) return show(ctx, '📄 최근 7일간 제출한 결과가 없습니다.', [[btn('✍️ 오늘 결과 제출', 'sd:a:결과')]]);
-    await show(ctx, `📄 <b>내 결과</b> (최근 7일 · ${rows.length}건)\n\n${rows.map((r) => resultLine(r, inPrivate(ctx))).join('\n')}\n\n번호를 눌러 상세 확인·수정·삭제`, [
+    const byDate = new Map<string, S.ResultRow[]>();
+    for (const r of rows) byDate.set(r.activity_date, [...(byDate.get(r.activity_date) || []), r]);
+    const days = [...byDate.entries()].map(
+        ([d, rs]) => `<b>${dayjs(d).format('M/D')} (${'일월화수목금토'[dayjs(d).day()]})</b> ${kindCount(rs)}\n${rs.map((r) => `#${r.id} ${formLine(r, inPrivate(ctx))}`).join('\n')}`
+    );
+    await show(ctx, `📄 <b>내 결과</b> 최근 7일 — 총 ${rows.length}건 (${kindCount(rows)})\n\n${days.join('\n\n')}\n\n번호를 눌러 상세 확인·수정·삭제`, [
         ...chunk(
             rows.map((r) => btn(`#${r.id}`, `sd:rs:view:${r.id}`)),
             5
@@ -748,7 +761,7 @@ async function todayHtml(orgId: number, date: string) {
             return `• ${e(m.display_name)}: ${avail}`;
         })
         .join('\n');
-    return { html, results };
+    return { html, results, members };
 }
 
 /* ====================== 단체방 현황판 (주제방의 한 메시지를 계속 갱신) ====================== */
@@ -761,8 +774,10 @@ async function refreshBoard(telegram: Telegraf['telegram'], orgId: number) {
     const b: Board | null = (await getSettings(orgId, MK)).board;
     if (!b) return;
     const date = today();
-    let html = `📌 <b>실시간 현황판</b> — 제출될 때마다 자동 갱신\n\n${(await todayHtml(orgId, date)).html}`;
-    if (html.length > 4000) html = html.slice(0, 3900) + '\n…(길어서 생략 — 전체는 관리자 /특전대 오늘현황)';
+    const { html: today_, results, members } = await todayHtml(orgId, date);
+    let html = `📌 <b>실시간 현황판</b> — 제출될 때마다 자동 갱신\n\n${today_}\n\n${boardList(results, members, 3900 - today_.length)}`;
+    // 텔레그램 한 메시지 4096자 제한 → 줄 단위로 자름 (태그가 줄 안에서 닫히므로 줄 경계는 안전)
+    if (html.length > 4000) html = html.slice(0, html.lastIndexOf('\n', 3900)) + '\n…(길어서 생략 — 전체는 관리자 /특전대 오늘현황)';
     if (b.messageId && b.date === date) {
         try {
             await telegram.editMessageText(b.chatId, b.messageId, undefined, html, { parse_mode: 'HTML' });
@@ -774,6 +789,23 @@ async function refreshBoard(telegram: Telegraf['telegram'], orgId: number) {
     const m = await telegram.sendMessage(b.chatId, html, { parse_mode: 'HTML', message_thread_id: b.threadId });
     await setSetting(orgId, MK, 'board', { ...b, date, messageId: m.message_id });
 }
+// 현황판: 오늘 올라온 결과를 대원별로 모아 올린 양식 그대로 (이름 가림·연락처 🔒)
+function boardList(results: S.ResultRow[], members: Membership[], budget: number) {
+    if (!results.length) return '<b>📋 오늘 올라온 결과</b>\n• 아직 없습니다.';
+    const names = new Map(members.map((m) => [m.user_id, m.display_name]));
+    const by = new Map<number, S.ResultRow[]>();
+    for (const r of [...results].reverse()) by.set(r.user_id, [...(by.get(r.user_id) || []), r]); // 올린 순서대로
+    let out = '<b>📋 오늘 올라온 결과</b>';
+    let shown = 0;
+    for (const [uid, rs] of by) {
+        const block = `\n\n<b>${e(names.get(uid) || rs[0].submitter || '?')}</b> ${kindCount(rs)}\n${rs.map((r) => formLine(r, false)).join('\n')}`;
+        if (out.length + block.length > budget) break;
+        out += block;
+        shown += rs.length;
+    }
+    return shown < results.length ? `${out}\n\n…외 ${results.length - shown}건 (전체는 관리자 /특전대 오늘현황)` : out;
+}
+
 const touchBoard = (ctx: Ctx, orgId: number) => refreshBoard(ctx.telegram, orgId).catch((err) => console.error('[현황판 갱신 실패]:', getErrorMessage(err)));
 
 // 현황판을 둘 주제(토픽)에서 '/특전대 현황판' — 해제는 '/특전대 현황판 해제'
