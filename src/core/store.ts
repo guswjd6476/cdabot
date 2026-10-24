@@ -89,6 +89,10 @@ export async function getGroupOrg(chatId: number, moduleKey: string): Promise<nu
     return (await query(`SELECT org_id FROM cdabot_group_chats WHERE chat_id = $1 AND module_key = $2;`, [String(chatId), moduleKey])).rows[0]?.org_id;
 }
 
+export async function listGroupChats(orgId: number, moduleKey: string): Promise<string[]> {
+    return (await query(`SELECT chat_id::text AS id FROM cdabot_group_chats WHERE org_id = $1 AND module_key = $2;`, [orgId, moduleKey])).rows.map((r) => r.id);
+}
+
 export async function setGroupOrg(chatId: number, moduleKey: string, orgId: number | null, title?: string, by?: number) {
     if (orgId === null) return void (await query(`DELETE FROM cdabot_group_chats WHERE chat_id = $1 AND module_key = $2;`, [String(chatId), moduleKey]));
     await query(

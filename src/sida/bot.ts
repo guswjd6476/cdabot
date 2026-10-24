@@ -2,7 +2,7 @@
 // 모든 기능은 봇과의 1:1 대화에서만 동작 (단체방에 개인정보가 올라가지 않게)
 import { Markup, Telegraf } from 'telegraf';
 import { Access, askOrg, hasPerm, Need, notifyManagers, registerModule, resolveAccess, session } from '../core/engine';
-import { audit, autoEnroll, getGroupOrg, getMember, setGroupOrg, getSettings, listMembers, listOrgs, Membership, Perm, PERMS, setSetting, updateMembership, upsertMembership, upsertUser } from '../core/store';
+import { audit, autoEnroll, getGroupOrg, listGroupChats, getMember, setGroupOrg, getSettings, listMembers, listOrgs, Membership, Perm, PERMS, setSetting, updateMembership, upsertMembership, upsertUser } from '../core/store';
 import { dayjs, escapeHtml, getErrorMessage, nowKst, parseFlexibleDate, replyLong, splitLongMessage } from '../utils';
 import * as T from './time';
 import * as R from './result';
@@ -147,7 +147,7 @@ const ACTIONS: Record<string, Action> = {
     마감: { label: '🔒 제출 마감', need: 'manager', run: closePeriod },
     재개방: { label: '🔓 제출 재개방', need: 'manager', run: reopenPeriod },
     주차시작: { label: '🆕 새 주차 시작', need: 'manager', run: startPeriod },
-    대원: { label: '🧑‍🤝‍🧑 대원 목록', need: 'manager', run: memberList },
+    대원: { label: '🧑‍🤝‍🧑 인원·역할 관리', need: 'manager', run: memberList },
     승인: { label: '🙋 가입 승인', need: 'manager', run: pendingList },
     수정허용: { need: 'manager', run: allowEdit },
     결과수정: { need: 'manager', run: (ctx, a, args) => editResult(ctx, a, Number(args)) },
@@ -929,16 +929,51 @@ async function allowEdit(ctx: Ctx, a: A, args: string) {
     await ctx.reply(`✏️ ${m.display_name} 님은 ${weekLabel(p.week_start)} 주차가 마감되어도 수정할 수 있습니다.`);
 }
 
+const roleOf = (m: Membership) => (m.status !== 'active' ? (m.status === 'pending' ? '⏳ 대기' : '🚫 제외') : m.perms.includes('manager') ? '🛠 관리자' : '🪖 대원');
+// 팀 관리자는 대원/제외만, 관리자 지정·관리자 변경은 시스템 관리자만
+const canSetRole = (a: A, m: Membership) => a.sysadmin || !m.perms.includes('manager');
+
 async function memberList(ctx: Ctx, a: A) {
     const all = await listMembers(a.org.id, MK, ['active', 'pending', 'inactive']);
-    const label = { active: '✅', pending: '⏳', inactive: '🚫', rejected: '❌' };
-    await replyLong(
+    // 텔레그램은 단체방 전체 인원을 알려주지 않음 → 봇이 본 사람(단체방에서 말한 사람) + 단체방 텔레그램 관리자 표시
+    const tgAdmins = new Set<string>();
+    for (const chatId of await listGroupChats(a.org.id, MK)) {
+        const admins = await ctx.telegram.getChatAdministrators(chatId).catch(() => []);
+        for (const x of Array.isArray(admins) ? admins : []) tgAdmins.add(String(x.user.id));
+    }
+    const count = (r: string) => all.filter((m) => roleOf(m) === r).length;
+    await show(
         ctx,
-        `🧑‍🤝‍🧑 <b>[${NAME} 대원]</b> ${e(a.org.name)}\n활성 ${all.filter((m) => m.status === 'active').length}명 · 대기 ${all.filter((m) => m.status === 'pending').length}명 · 비활성 ${all.filter((m) => m.status === 'inactive').length}명\n\n` +
-            all.map((m) => `${label[m.status]} ${e(m.display_name)} · <code>${m.telegram_id}</code> · ${m.perms.map((p) => PERM_LABEL[p]).join(',')}`).join('\n') +
-            '\n\n관리: <code>/특전대 등록 ID 이름</code> · <code>/특전대 활성 ID</code> · <code>/특전대 비활성 ID</code> · <code>/특전대 이름 ID 새이름</code>' +
-            (a.sysadmin ? ' · <code>/특전대 권한 ID member,manager,pii</code>' : '')
+        `🧑‍🤝‍🧑 <b>[${NAME} 인원]</b> ${e(a.org.name)}\n🪖 대원 ${count('🪖 대원')}명 · 🛠 관리자 ${count('🛠 관리자')}명 · 🚫 제외 ${count('🚫 제외')}명${count('⏳ 대기') ? ` · ⏳ 대기 ${count('⏳ 대기')}명` : ''}\n\n` +
+            all.map((m) => `${roleOf(m)} ${e(m.display_name)}${tgAdmins.has(m.telegram_id) ? ' 👑' : ''} · <code>${m.telegram_id}</code>`).join('\n') +
+            '\n\n👇 이름을 눌러 대원 / 관리자 / 제외를 바꿉니다. 대원만 활동 시간·미제출 집계에 들어갑니다.' +
+            '\n• 단체방에서 한 번이라도 말한 사람만 목록에 나옵니다 (텔레그램 정책상 전체 인원은 볼 수 없음). 👑 = 단체방 관리자' +
+            '\n• 직접 추가: <code>/특전대 등록 ID 이름</code> · 이름 변경: <code>/특전대 이름 ID 새이름</code>',
+        chunk(
+            all.map((m) => btn(`${roleOf(m).split(' ')[0]} ${m.display_name}${tgAdmins.has(m.telegram_id) ? ' 👑' : ''}`, `sd:mr:${m.id}`)),
+            2
+        )
     );
+}
+
+async function memberRole(ctx: Ctx, a: A, arg: string) {
+    const [id, role] = arg.split('-');
+    const m = await getMember(a.org.id, MK, { id: Number(id) });
+    if (!m) return;
+    if (!canSetRole(a, m)) return void (await ctx.reply('⛔ 관리자 변경은 시스템 관리자만 할 수 있습니다.'));
+    if (role) {
+        if (role === 'manager' && !a.sysadmin) return void (await ctx.reply('⛔ 관리자 지정은 시스템 관리자만 할 수 있습니다.'));
+        const patch =
+            role === 'out' ? { status: 'inactive' } : { status: 'active', perms: role === 'manager' ? (['manager', ...(m.perms.includes('pii') ? ['pii'] : [])] as Perm[]) : (['member'] as Perm[]) };
+        await updateMembership(a.org.id, m.id, patch);
+        await audit(a.org.id, a.userId, 'member.role', m.id, { role });
+        return memberList(ctx, a);
+    }
+    const choices = [btn('🪖 대원', `sd:mr:${m.id}-member`), ...(a.sysadmin ? [btn('🛠 관리자', `sd:mr:${m.id}-manager`)] : []), btn('🚫 제외', `sd:mr:${m.id}-out`)];
+    await show(ctx, `👤 <b>${e(m.display_name)}</b> (<code>${m.telegram_id}</code>)\n지금: ${roleOf(m)}\n\n• 대원: 활동 시간·결과 제출, 집계 대상\n• 관리자: 1:1 대화에서 현황·보고서, 집계 제외\n• 제외: 봇 사용 불가, 집계 제외`, [
+        choices,
+        [btn('◀ 목록', 'sd:a:대원')],
+    ]);
 }
 
 async function pendingList(ctx: Ctx, a: A) {
@@ -1038,7 +1073,7 @@ const HELP_MANAGER =
     '• <code>/특전대 결과검색 기간:10.1~10.24 인도지역:서울</code>\n' +
     '• <code>/특전대 미제출</code> · <code>부족시간</code> · <code>마감</code> · <code>재개방 [날짜]</code> · <code>주차시작 [날짜]</code> · <code>수정허용 ID</code>\n' +
     '• 단체방에서: <code>/특전대 방등록</code> (그 방 사람은 가입 요청 없이 자동 대원) · <code>방해제</code>\n' +
-    '• <code>/특전대 대원</code> · <code>승인</code> · <code>등록 ID 이름</code> · <code>활성/비활성 ID</code> · <code>이름 ID 새이름</code> · <code>옵션</code> · <code>결과수정 번호</code>';
+    '• <code>/특전대 대원</code> — 이름 눌러 대원/관리자/제외 (대원만 집계) · <code>승인</code> · <code>등록 ID 이름</code> · <code>활성/비활성 ID</code> · <code>이름 ID 새이름</code> · <code>옵션</code> · <code>결과수정 번호</code>';
 const HELP_ADMIN = '\n\n🛠 <b>시스템 관리자</b>\n• <code>/특전대 권한 ID member,manager,pii</code> · <code>기준 6</code> · <code>보관기간 365</code> · <code>/조직</code>';
 
 async function help(ctx: Ctx, a: A) {
@@ -1103,6 +1138,7 @@ export function registerSida(bot: Telegraf<any>) {
                 return resultsCsv(ctx, scoped, await S.listResults(scoped.org.id, q.filter), 'results_search');
             }
             if (op === 'pm') return personDetail(ctx, scoped, Number(arg));
+            if (op === 'mr') return memberRole(ctx, scoped, arg);
         })
     );
 

@@ -24,6 +24,7 @@ let calls: Call[] = [];
     calls.push({ method, payload });
     if (method === 'getMe') return { id: 1, is_bot: true, first_name: 'sida', username: 'sidabot' };
     if (method === 'answerCallbackQuery') return true;
+    if (method === 'getChatAdministrators') return [{ status: 'creator', user: { id: 301 } }];
     return { message_id: calls.length, date: 0, chat: { id: payload.chat_id, type: 'private' }, text: payload.text };
 };
 
@@ -347,6 +348,38 @@ test('등록된 단체방에서는 가입 요청 없이 자동 대원 등록', a
     assert.match(await send(ADMIN, '/특전대 방해제', ++messageId, ROOM), /해제/);
     assert.match(await send(919, '/특전대', ++messageId, ROOM), /등록되어 있지 않습니다/);
     await send(ADMIN, '/특전대 비활성 707'); // 다음 테스트 인원 수에 영향 없게
+});
+
+test('인원·역할 관리 — 목록에서 눌러 대원/관리자/제외, 대원만 집계', async () => {
+    const ROOM = -100999;
+    await send(ADMIN, '/특전대 방등록', ++messageId, ROOM);
+    await send(961, '/특전대', ++messageId, ROOM); // 단체방에서 말한 사람 → 일단 대원
+    await send(962, '/특전대', ++messageId, ROOM);
+    const list = await send(ADMIN, '/특전대 대원');
+    assert.match(list, /🪖 대원 U961 · <code>961<\/code>/);
+    assert.ok(labels().includes('🪖 U962'));
+    assert.ok(labels().some((l) => l.endsWith('👑')), '단체방 텔레그램 관리자 표시');
+    const m962 = (await getMember(1, S.MODULE_KEY, { telegramId: '962' }))!;
+
+    // 팀 관리자(301)는 관리자 지정 불가, 대원/제외만
+    await press(301, `sd:mr:${m962.id}`);
+    assert.deepEqual(labels(), ['🪖 대원', '🚫 제외', '◀ 목록']);
+    assert.match(await press(301, `sd:mr:${m962.id}-manager`), /시스템 관리자만/);
+
+    assert.match(await press(ADMIN, `sd:mr:${m962.id}-manager`), /🛠 관리자 U962/);
+    assert.deepEqual((await getMember(1, S.MODULE_KEY, { id: m962.id }))!.perms, ['manager']);
+    assert.doesNotMatch(await send(ADMIN, '/특전대 미제출 2026.10.26'), /U962/); // 관리자는 집계 제외
+    assert.match(await send(ADMIN, '/특전대 미제출 2026.10.26'), /U961/);
+    assert.match(await press(301, `sd:mr:${m962.id}-out`), /시스템 관리자만/); // 팀 관리자는 다른 관리자 못 바꿈
+
+    const m961 = (await getMember(1, S.MODULE_KEY, { telegramId: '961' }))!;
+    assert.match(await press(301, `sd:mr:${m961.id}-out`), /🚫 제외 U961/);
+    assert.match(await send(961, '/특전대', ++messageId, ROOM), /비활성화된 계정/); // 제외되면 다시 말해도 대원으로 안 돌아감
+    assert.doesNotMatch(await send(ADMIN, '/특전대 미제출 2026.10.26'), /U961/);
+    assert.match(await press(101, `sd:mr:${m961.id}-member`), /권한이 없습니다/); // 대원은 못 바꿈
+
+    await send(ADMIN, '/특전대 방해제', ++messageId, ROOM);
+    await press(ADMIN, `sd:mr:${m962.id}-out`); // 다음 테스트 인원 수에 영향 없게
 });
 
 test('[14] 조직별 데이터 분리', async () => {
