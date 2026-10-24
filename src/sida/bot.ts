@@ -40,7 +40,7 @@ async function show(ctx: Ctx, html: string, buttons?: Buttons) {
 }
 
 const inPrivate = (ctx: Ctx) => ctx.chat?.type === 'private';
-// 이름·연락처를 지금 이 대화에 보여도 되는지: 개인정보 권한 + 1:1 대화 (단체방에는 항상 가림)
+// 관리자 검색·현황에서 이름·연락처를 보여도 되는지: 개인정보 권한 + 1:1 대화
 const piiHere = (ctx: Ctx, a: A) => hasPerm(a, 'pii') && inPrivate(ctx);
 const dmButton = (ctx: Ctx) => {
     const me = ctx.botInfo?.username;
@@ -383,7 +383,7 @@ async function setField(ctx: Ctx, f: ResultFlow, raw: string) {
     await askNext(ctx, f);
 }
 
-// hidePii: 단체방에서는 이름 가림, 연락처·생년월일 숨김
+// hidePii: 개인정보 권한 없는 관리자 화면에서 이름 가림, 연락처·생년월일 숨김
 const piiCell = (k: R.FieldKey, v: string, hidePii: boolean) => (!hidePii || !R.PII_FIELDS.includes(k) ? e(v) : k === 'name' ? e(R.maskName(v)) : '🔒');
 const resultDetail = (v: R.ResultValues, form: R.FormKind, hidePii = false) =>
     R.FORMS[form].fields.map((k, i) => `${i + 1}. ${R.fieldLabel(k)}: ${v[k] ? piiCell(k, v[k]!, hidePii) : '<i>(미입력)</i>'}`).join('\n');
@@ -458,7 +458,7 @@ async function resultCb(ctx: Ctx, a: A, s: Record<string, any>, arg: string) {
         }
         return show(
             ctx,
-            `📄 <b>${R.FORMS[row.kind].label} #${row.id}</b> (활동일 ${row.activity_date})\n제출: ${e(row.submitter)} · ${row.created_at}${row.updated_at !== row.created_at ? ` (수정 ${row.updated_at})` : ''}\n\n${resultDetail(row, row.kind, !inPrivate(ctx))}`,
+            `📄 <b>${R.FORMS[row.kind].label} #${row.id}</b> (활동일 ${row.activity_date})\n제출: ${e(row.submitter)} · ${row.created_at}${row.updated_at !== row.created_at ? ` (수정 ${row.updated_at})` : ''}\n\n${resultDetail(row, row.kind)}`,
             [[btn('✏️ 수정', `sd:rs:edit:${row.id}`), btn('🗑 삭제', `sd:rs:del:${row.id}`)]]
         );
     }
@@ -574,7 +574,7 @@ async function handleFreeForm(ctx: Ctx, text: string): Promise<boolean> {
     for (const [i, form] of forms.entries()) {
         const one = clean(form, true);
         const p = who(one.kind, form.values);
-        const label = `${i + 1}번째 줄 ${e(R.maskName(one.values.name) || '(이름 없음)')}`;
+        const label = `${i + 1}번째 줄 ${e(one.values.name || '(이름 없음)')}`;
         const key = p && `${one.kind}|${p.name}|${p.digits}`;
         if ((key && seen.has(key)) || (p && (await S.isDuplicateResult(a.org.id, one.kind, p.name, p.digits)))) {
             skipped.push(label);
@@ -598,7 +598,7 @@ async function handleFreeForm(ctx: Ctx, text: string): Promise<boolean> {
     return true;
 }
 
-// 올린 양식 그대로 한 줄 (발/이름/…). 개인정보 권한이 없거나 단체방이면 이름 가림·연락처/생년월일 🔒
+// 올린 양식 그대로 한 줄 (발/이름/…). pii=false 면 이름 가림·연락처/생년월일 🔒
 function formLine(r: S.ResultRow, pii: boolean) {
     const cell = (k: R.FieldKey) => (r[k] ? piiCell(k, r[k]!, !pii) : '');
     if (r.kind === 'find') return `찾/${R.FORMS.find.fields.map(cell).join('/')}`;
@@ -620,7 +620,7 @@ async function myResults(ctx: Ctx, a: A) {
     const byDate = new Map<string, S.ResultRow[]>();
     for (const r of rows) byDate.set(r.activity_date, [...(byDate.get(r.activity_date) || []), r]);
     const days = [...byDate.entries()].map(
-        ([d, rs]) => `<b>${dayjs(d).format('M/D')} (${'일월화수목금토'[dayjs(d).day()]})</b> ${kindCount(rs)}\n${rs.map((r) => `#${r.id} ${formLine(r, inPrivate(ctx))}`).join('\n')}`
+        ([d, rs]) => `<b>${dayjs(d).format('M/D')} (${'일월화수목금토'[dayjs(d).day()]})</b> ${kindCount(rs)}\n${rs.map((r) => `#${r.id} ${formLine(r, true)}`).join('\n')}`
     );
     await show(ctx, `📄 <b>내 결과</b> 최근 7일 — 총 ${rows.length}건 (${kindCount(rows)})\n\n${days.join('\n\n')}\n\n번호를 눌러 상세 확인·수정·삭제`, [
         ...chunk(
@@ -731,7 +731,7 @@ function perPerson(rows: S.ResultRow[], members: Membership[]) {
     return lines.join('\n') || '• 아직 없습니다.';
 }
 
-// 일일 현황 (결과 대상자 이름·연락처 같은 개인정보 없음 → 단체방 현황판에도 사용)
+// 일일 현황 (결과 대상자 이름·연락처 없음, 단체방 현황판에도 사용)
 async function todayHtml(orgId: number, date: string) {
     const ws = weekStartOf(date);
     const w = weekdayOf(date);
@@ -794,7 +794,7 @@ async function refreshBoard(telegram: Telegraf['telegram'], orgId: number) {
     const m = await telegram.sendMessage(b.chatId, html, { parse_mode: 'HTML', message_thread_id: b.threadId });
     await setSetting(orgId, MK, 'board', { ...b, date, messageId: m.message_id });
 }
-// 현황판: 오늘 올라온 결과를 대원별로 모아 올린 양식 그대로 (이름 가림·연락처 🔒)
+// 현황판: 오늘 올라온 결과를 대원별로 모아 올린 양식 그대로
 function boardList(results: S.ResultRow[], members: Membership[], budget: number) {
     if (!results.length) return '<b>📋 오늘 올라온 결과</b>\n• 아직 없습니다.';
     const names = new Map(members.map((m) => [m.user_id, m.display_name]));
@@ -803,7 +803,7 @@ function boardList(results: S.ResultRow[], members: Membership[], budget: number
     let out = '<b>📋 오늘 올라온 결과</b>';
     let shown = 0;
     for (const [uid, rs] of by) {
-        const block = `\n\n<b>${e(names.get(uid) || rs[0].submitter || '?')}</b> ${kindCount(rs)}\n${rs.map((r) => formLine(r, false)).join('\n')}`;
+        const block = `\n\n<b>${e(names.get(uid) || rs[0].submitter || '?')}</b> ${kindCount(rs)}\n${rs.map((r) => formLine(r, true)).join('\n')}`;
         if (out.length + block.length > budget) break;
         out += block;
         shown += rs.length;

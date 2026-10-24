@@ -204,9 +204,8 @@ test('[8][9][11] 발굴건·찾기건 한 줄 양식 — 자동 정리, 빠진 �
         5100
     );
     assert.match(bulk, /결과 3건 저장/);
-    assert.match(bulk, /#\d+ 발굴건 1번째 줄 테\*트\n/); // 연락처 뒷자리 4자리 OK, 2차 만남은 없어도 빈 칸 아님
-    assert.match(bulk, /중복 제외 2건[\s\S]*4번째 줄 홍\*동\n5번째 줄 테\*\*2/);
-    assert.ok(!bulk.includes('1234'), '단체방 답장에 연락처 안 보임');
+    assert.match(bulk, /#\d+ 발굴건 1번째 줄 테스트\n/); // 연락처 뒷자리 4자리 OK, 2차 만남은 없어도 빈 칸 아님
+    assert.match(bulk, /중복 제외 2건[\s\S]*4번째 줄 홍길동\n5번째 줄 테스트2/);
     const added: S.ResultRow[] = (await S.listResults(1)).filter((r) => r.name?.startsWith('테스트'));
     assert.deepEqual(added.map((r) => [r.name, r.phone, r.age_group, r.tool]).sort(), [
         ['테스트', '1234', '20대 초', '노방'],
@@ -214,7 +213,7 @@ test('[8][9][11] 발굴건·찾기건 한 줄 양식 — 자동 정리, 빠진 �
         ['테스트3', '4234', '20대 초', '노방'],
     ]);
     assert.match(await send(101, '발/테스트/1234/20대초'), /이미 등록된 발굴건/); // 한 건짜리도 중복이면 저장 안 함
-    assert.match(await send(101, '발/테스트3/010-5555-4234\n발/테스트3/9999'), /결과 1건 저장[\s\S]*2번째 줄 테\*\*3[\s\S]*중복 제외 1건[\s\S]*1번째 줄/); // 전체 번호여도 뒷자리로 비교
+    assert.match(await send(101, '발/테스트3/010-5555-4234\n발/테스트3/9999'), /결과 1건 저장[\s\S]*2번째 줄 테스트3[\s\S]*중복 제외 1건[\s\S]*1번째 줄/); // 전체 번호여도 뒷자리로 비교
     for (const r of (await S.listResults(1)).filter((x) => x.phone === '9999')) added.push(r);
     assert.match(await send(101, '발/테스트/1234\n발/테스트3/4234'), /결과 0건 저장[\s\S]*중복 제외 2건/); // 다시 올려도 안 늘어남
     for (const r of added) await S.deleteResult(1, r.id); // 아래 건수 검증에 영향 없게
@@ -329,8 +328,7 @@ test('단체방(대원) / 1:1 대화(관리자) — 장소 안내, 남의 버튼
     assert.match(await send(205, '발/방철수/010-5555-6666/30대/남/광주/3팀/김/책/10.31 14시,광주역'), /결과 확인/);
     assert.match(await press(205, 'sd:rs:ok~205'), /저장 완료/);
     const mine = await send(205, '/특전대 내결과');
-    assert.ok(!mine.includes('010-5555-6666'), '단체방 내 결과 목록은 연락처 가림');
-    assert.match(mine, /내 결과<\/b> 최근 7일 — 총 \d+건 \(발 \d+건 \(만남확정 1건\) · 찾 \d+건\)\n\n<b>\d+\/\d+ \(.\)<\/b> 발 \d+건 \(만남확정 1건\) · 찾 \d+건\n#\d+ 발\/방\*수\/🔒\/30대\/남\/광주\/3팀\/김\/책\/\+10\.31 14시,광주역/);
+    assert.match(mine, /내 결과<\/b> 최근 7일 — 총 \d+건 \(발 \d+건 \(만남확정 1건\) · 찾 \d+건\)\n\n<b>\d+\/\d+ \(.\)<\/b> 발 \d+건 \(만남확정 1건\) · 찾 \d+건\n#\d+ 발\/방철수\/010-5555-6666\/30대\/남\/광주\/3팀\/김\/책\/\+10\.31 14시,광주역/);
 
     // 30분 넘게 방치된 입력은 단체방 대화를 먹지 않음
     await send(205, '/특전대 결과');
@@ -443,7 +441,6 @@ test('주제방 현황판 — 한 메시지를 계속 갱신, 날짜 바뀌면 �
     assert.equal(made.payload.message_thread_id, 7); // 현황판 주제에 올라감
     assert.match(made.payload.text, /실시간 현황판[\s\S]*당일 결과<\/b> — 총[\s\S]*이번 주 누적[\s\S]*요일별/);
     assert.ok(!made.payload.text.includes('항목별 집계'), '현황판은 대원별 건수 중심');
-    assert.ok(!/010-|1234/.test(made.payload.text), '현황판에 연락처 없음');
     const board = (await getSettings(1, S.MODULE_KEY)).board;
     assert.deepEqual([board.chatId, board.threadId, board.date], [ROOM, 7, nowKst().format('YYYY-MM-DD')]);
 
@@ -453,8 +450,7 @@ test('주제방 현황판 — 한 메시지를 계속 갱신, 날짜 바뀌면 �
     const edit = posted.find((c) => c.method === 'editMessageText')!;
     assert.deepEqual([edit.payload.chat_id, edit.payload.message_id], [ROOM, board.messageId]);
     assert.match(edit.payload.text, /당일 결과<\/b> — 총 \d+건[^\n]*[\s\S]*• U101: 발 \d+건[^\n]* · 찾 \d+건/);
-    assert.match(edit.payload.text, /📋 오늘 올라온 결과<\/b>[\s\S]*<b>U101<\/b> 발 \d+건[^\n]* · 찾 \d+건\n[\s\S]*발\/주\*\/🔒\/30대\/{5}\n발\/주\*2\/🔒\/30대/); // 올린 양식 그대로, 이름 가림·연락처 🔒
-    assert.ok(!edit.payload.text.includes('5678'));
+    assert.match(edit.payload.text, /📋 오늘 올라온 결과<\/b>[\s\S]*<b>U101<\/b> 발 \d+건[^\n]* · 찾 \d+건\n[\s\S]*발\/주제\/5678\/30대\/{5}\n발\/주제2\/6789\/30대/); // 올린 양식 그대로
 
     await setSetting(1, S.MODULE_KEY, 'board', { ...board, date: '2000-01-01' }); // 날짜가 바뀐 것처럼
     const next = await topic(101, '/활동시간 일/10-12', 9);
