@@ -134,7 +134,6 @@ async function access(ctx: Ctx): Promise<Access> {
 
 const ACTIONS: Record<string, Action> = {
     제출: { label: '📝 활동 시간 제출', need: 'member', run: startAvail },
-    채팅제출: { need: 'member', run: (ctx, a) => startAvail(ctx, a, '채팅') },
     내현황: { label: '📊 내 활동 현황', need: 'member', run: myStatus },
     결과: { label: '✍️ 오늘 결과 제출', need: 'member', run: (ctx, a) => startResult(ctx, a) },
     내결과: { label: '📄 내 결과 확인', need: 'member', run: myResults },
@@ -266,185 +265,24 @@ async function decideJoin(ctx: Ctx, a: Access, arg: string, approve: boolean) {
 
 /* ====================== 활동 가능 시간 제출 ====================== */
 
-interface AvailFlow {
-    kind: 'avail';
-    chatId: number;
-    orgId: number;
-    periodId: number;
-    weekStart: string;
-    min: number;
-    day: number;
-    days: S.WeekDays;
-    existed: boolean;
-    mode?: string; // edit:<index>
-    review?: boolean;
-}
+const WEEK_EXAMPLE = '월/12-14,18-20\n화/15-18,19-21\n수/불가\n목/11-19\n금/11-20\n토/10-20';
 
-async function startAvail(ctx: Ctx, a: A, args = '') {
-    // 미니앱이 설정돼 있으면 단체방에서는 입력 창(미니앱)으로 — 대화에 시간 입력이 섞이지 않게
-    const app = process.env.MINIAPP_URL;
-    if (app && !inPrivate(ctx) && args !== '채팅')
-        return show(ctx, '📝 아래 버튼을 누르면 활동 시간 입력 창이 열립니다.\n입력한 내용은 단체방 대화에 올라가지 않습니다.', [
-            [Markup.button.url('📝 활동 시간 입력 창 열기', `${app}?startapp=g${ctx.chat.id}`)],
-            [btn('💬 채팅으로 입력', 'sd:a:채팅제출')],
-        ]);
+// 미니앱이 설정돼 있으면 입력 창 버튼, 아니면 한 메시지 입력 안내
+async function startAvail(ctx: Ctx, a: A) {
     const p = await S.getEditablePeriod(a.org.id, a.userId);
     if (!p) return void (await ctx.reply('⏳ 지금은 활동 시간을 받는 주차가 없습니다 (마감되었거나 시작 전). 관리자에게 문의해주세요.'));
-    const [existing, settings] = await Promise.all([S.getSubmissions(p.id).then((m) => m.get(a.userId)), getSettings(a.org.id, MK)]);
-    const days: S.WeekDays = existing?.days ?? Object.fromEntries(T.WEEKDAYS.map((w) => [w, { unavailable: false, slots: [] }]));
-    const f: AvailFlow = {
-        kind: 'avail',
-        chatId: ctx.chat.id,
-        orgId: a.org.id,
-        periodId: p.id,
-        weekStart: p.week_start,
-        min: Number(settings.min_minutes) || T.DEFAULT_MIN_MINUTES,
-        day: 1,
-        days,
-        existed: !!existing,
-    };
-    (await session(ctx)).flow = f;
-    if (existing) await ctx.reply('ℹ️ 이미 제출한 내용을 불러왔습니다. 수정 후 다시 최종 제출해주세요.');
-    await renderDay(ctx, f);
-}
-
-async function renderDay(ctx: Ctx, f: AvailFlow, note = '') {
-    const d = f.days[f.day];
-    const total = T.totalMinutes(d.slots);
-    let html = `📝 <b>활동 가능 시간 제출</b> (${weekLabel(f.weekStart)})\n<b>[${T.DAY_NAMES[f.day]}요일 ${dateOf(f.weekStart, f.day).format('M/D')}]</b> ${f.day}/${T.WEEKDAYS.length}\n\n`;
-    if (d.unavailable) html += '🚫 <b>활동 불가</b>로 표시됨\n';
-    else if (!d.slots.length) html += '아직 입력한 시간이 없습니다.\n';
-    else {
-        html += d.slots.map((s, i) => `${i + 1}) ${T.fmtSlot(s)} · ${T.fmtHours(s[1] - s[0])}`).join('\n');
-        html += `\n합계(겹침 제외): <b>${T.fmtHours(total)}</b> ${total >= f.min ? '✅ 충족' : `⚠️ 미충족 (기준 ${T.fmtHours(f.min)})`}\n`;
-    }
-    if (note) html += `\n${note}\n`;
-    html += f.mode?.startsWith('edit:')
-        ? `\n✏️ <b>${Number(f.mode.slice(5)) + 1}번 구간</b>을 대신할 시간을 보내주세요. 예: <code>10:00~13:00</code>`
-        : '\n👉 시간 구간을 메시지로 보내주세요.\n예: <code>09:00~12:00</code> · 여러 개는 쉼표로 <code>09:00~12:00, 14:00~17:00</code>\n💡 한 번에: <code>월/09:00-14:00,18:00-21:00 화/12:00-14:00 수/불가</code>';
-    const buttons: Buttons = [[btn('🕘 버튼으로 추가', 'sd:av:bs')]];
-    if (d.slots.length) buttons[0].push(btn('✏️ 수정', 'sd:av:el'), btn('🗑 삭제', 'sd:av:dl'));
-    buttons.push([btn(d.unavailable ? '↩️ 활동 불가 해제' : '🚫 이 날 활동 불가', 'sd:av:un')]);
-    buttons.push([...(f.day > 1 && !f.review ? [btn('◀ 이전 요일', 'sd:av:pv')] : []), btn(f.review || f.day === T.WEEKDAYS.length ? '✅ 입력 완료 → 요약' : '✅ 입력 완료 ▶', 'sd:av:nx')]);
-    buttons.push([btn('✖ 취소', 'sd:av:cx')]);
-    await show(ctx, html, buttons);
-}
-
-async function renderReview(ctx: Ctx, f: AvailFlow, note = '') {
-    f.review = true;
-    f.mode = undefined;
-    await show(ctx, `📋 <b>제출 내용 확인</b> (${weekLabel(f.weekStart)})\n\n${renderPersonWeek(f.weekStart, f.days, f.min)}${note}\n\n확인 후 <b>최종 제출</b>을 눌러주세요.`, [
-        [btn('✅ 최종 제출', 'sd:av:ok')],
-        T.WEEKDAYS.map((w) => btn(T.DAY_NAMES[w], `sd:av:go:${w}`)),
-        [btn('✖ 취소', 'sd:av:cx')],
+    const app = process.env.MINIAPP_URL;
+    if (app) return show(ctx, `📝 <b>${weekLabel(p.week_start)} 활동 시간</b>\n아래 버튼을 누르면 입력 창이 열립니다. 입력한 내용은 단체방 대화에 올라가지 않습니다.`, [
+        [Markup.button.url('📝 활동 시간 입력 창 열기', `${app}?startapp=g${ctx.chat.id}`)],
     ]);
+    await show(ctx, `📝 <b>${weekLabel(p.week_start)} 활동 시간</b>\n이렇게 한 메시지로 보내주세요 (한 줄에 한 요일, 시간 여러 개는 쉼표, 못 하는 날은 불가):\n\n<code>${WEEK_EXAMPLE}</code>\n\n처음 제출이면 안 적은 요일은 활동 불가, 이미 제출했다면 적은 요일만 바뀝니다.`);
 }
 
-async function availText(ctx: Ctx, f: AvailFlow, text: string) {
-    const d = f.days[f.day];
-    const { slots, errors } = T.parseRanges(text);
-    if (errors.length || !slots.length) {
-        await ctx.reply(`⚠️ ${errors.join('\n') || '시간을 찾지 못했습니다.'}\n다시 입력해주세요.`);
-        return renderDay(ctx, f);
-    }
-    if (f.mode?.startsWith('edit:')) {
-        if (slots.length !== 1) return void (await ctx.reply('⚠️ 수정할 때는 구간 하나만 입력해주세요.'));
-        d.slots[Number(f.mode.slice(5))] = slots[0];
-    } else d.slots.push(...slots);
-    d.unavailable = false;
-    f.mode = undefined;
-    const overlapped = T.totalMinutes(d.slots) < d.slots.reduce((sum, [s, en]) => sum + en - s, 0);
-    await renderDay(ctx, f, overlapped ? 'ℹ️ 겹치는 시간은 한 번만 계산됩니다.' : '');
-}
-
-async function availCb(ctx: Ctx, a: A, s: Record<string, any>, arg: string) {
-    const f: AvailFlow | undefined = s.flow;
-    if (f?.kind !== 'avail' || f.orgId !== a.org.id) return show(ctx, '⌛ 진행 중인 입력이 없습니다. /특전대 에서 다시 시작해주세요.');
-    if (!hasPerm(a, 'member')) return show(ctx, '⛔ 권한이 없습니다.');
-    const [cmd, v = ''] = arg.split(':');
-    const d = f.days[f.day];
-    const dayName = `${T.DAY_NAMES[f.day]}요일`;
-    switch (cmd) {
-        case 'bs':
-            return show(ctx, `🕘 [${dayName}] <b>시작 시각</b>을 선택하세요.\n(30분 단위는 메시지로: 예 <code>09:30~12:00</code>)`, [
-                ...chunk(
-                    Array.from({ length: 24 }, (_, h) => btn(`${h}시`, `sd:av:bh:${h}`)),
-                    6
-                ),
-                [btn('◀ 돌아가기', 'sd:av:back')],
-            ]);
-        case 'bh': {
-            const h = Number(v);
-            return show(ctx, `🕘 [${dayName}] 시작 ${T.fmtClock(h * 60)} — <b>종료 시각</b>을 선택하세요.`, [
-                ...chunk(
-                    Array.from({ length: 24 - h }, (_, i) => btn(`${h + i + 1}시`, `sd:av:be:${h}-${h + i + 1}`)),
-                    6
-                ),
-                [btn('◀ 돌아가기', 'sd:av:back')],
-            ]);
-        }
-        case 'be': {
-            const [h, en] = v.split('-').map(Number);
-            if (!(h >= 0 && en > h && en <= 24)) break;
-            d.slots.push([h * 60, en * 60]);
-            d.unavailable = false;
-            break;
-        }
-        case 'el':
-        case 'dl':
-            return show(ctx, `${cmd === 'el' ? '✏️ 수정' : '🗑 삭제'}할 구간을 선택하세요.`, [
-                ...d.slots.map((sl, i) => [btn(`${i + 1}) ${T.fmtSlot(sl)}`, `sd:av:${cmd === 'el' ? 'ei' : 'di'}:${i}`)]),
-                [btn('◀ 돌아가기', 'sd:av:back')],
-            ]);
-        case 'ei':
-            if (d.slots[Number(v)]) f.mode = `edit:${Number(v)}`;
-            break;
-        case 'di':
-            d.slots.splice(Number(v), 1);
-            break;
-        case 'un':
-            d.unavailable = !d.unavailable;
-            if (d.unavailable) d.slots = [];
-            break;
-        case 'pv':
-            f.day = Math.max(1, f.day - 1);
-            f.mode = undefined;
-            break;
-        case 'nx':
-            if (!d.unavailable && !d.slots.length) return renderDay(ctx, f, '⚠️ 시간을 추가하거나 [이 날 활동 불가]를 선택해주세요.');
-            f.mode = undefined;
-            if (f.review || f.day === T.WEEKDAYS.length) return renderReview(ctx, f);
-            f.day++;
-            break;
-        case 'go':
-            f.day = Number(v) || 1;
-            break;
-        case 'ok':
-            return submitAvail(ctx, a, s, f);
-        case 'cx':
-            delete s.flow;
-            return show(ctx, '✖ 입력을 취소했습니다. (이전에 제출한 내용은 그대로입니다)');
-    }
-    await renderDay(ctx, f);
-}
-
-async function submitAvail(ctx: Ctx, a: A, s: Record<string, any>, f: AvailFlow) {
-    const p = await S.getEditablePeriod(f.orgId, a.userId);
-    if (!p || p.id !== f.periodId) {
-        delete s.flow;
-        return show(ctx, '🔒 제출이 마감되어 저장하지 못했습니다. 관리자에게 문의해주세요.');
-    }
-    const empty = T.WEEKDAYS.find((w) => !f.days[w].unavailable && !f.days[w].slots.length);
-    if (empty) {
-        f.day = empty;
-        return renderDay(ctx, f, '⚠️ 이 요일이 비어 있습니다. 시간을 입력하거나 활동 불가를 선택해주세요.');
-    }
-    await S.saveSubmission(p.id, a.userId, f.days);
-    await audit(f.orgId, a.userId, f.existed ? 'avail.update' : 'avail.submit', p.id, f.days);
-    delete s.flow;
-    await show(ctx, `✅ <b>활동 가능 시간 ${f.existed ? '수정' : '제출'} 완료</b> (${weekLabel(f.weekStart)})\n\n${renderPersonWeek(f.weekStart, f.days, f.min)}`, [
-        [btn('📊 내 활동 현황', 'sd:a:내현황'), btn('🏠 메뉴', 'sd:a:')],
-    ]);
+// 미니앱·채팅 공통 저장. 안 적은 요일은 base(기존 제출) 값, 없으면 활동 불가
+async function saveWeek(orgId: number, userId: number, p: S.Period, entered: Record<number, T.DayInput>, base?: S.WeekDays) {
+    const days: S.WeekDays = Object.fromEntries(T.WEEKDAYS.map((w) => [w, entered[w] ?? base?.[w] ?? { unavailable: true, slots: [] }]));
+    await S.saveSubmission(p.id, userId, days);
+    return days;
 }
 
 async function myStatus(ctx: Ctx, a: A) {
@@ -688,13 +526,12 @@ export async function appApi(telegram: Telegraf['telegram'], from: { id: number;
     const parsed = T.parseWeekText(text);
     if (!parsed) return { error: '요일/시간 형식으로 적어주세요. 예: 월/12-14,18-20' };
     if (parsed.errors.length) return { error: parsed.errors.join('\n') };
-    const days: S.WeekDays = Object.fromEntries(T.WEEKDAYS.map((w) => [w, parsed.days[w] ?? { unavailable: true, slots: [] }]));
-    await S.saveSubmission(p.id, user.id, days);
+    const days = await saveWeek(orgId, user.id, p, parsed.days); // 입력 창에 보이는 그대로
     await audit(orgId, user.id, existing ? 'avail.update' : 'avail.submit', p.id, days);
     return { week, done: existing ? '수정' : '제출', html: renderPersonWeek(p.week_start, days, Number(settings.min_minutes) || T.DEFAULT_MIN_MINUTES) };
 }
 
-// 단체방에 '월/09:00-14:00 화/…' → 확인 화면 (최종 제출 버튼으로 저장)
+// 단체방에 '월/12-14,18-20 화/…' 한 메시지 → 바로 저장
 async function handleWeekText(ctx: Ctx, text: string): Promise<boolean> {
     const parsed = T.parseWeekText(text);
     if (!parsed) return false;
@@ -708,7 +545,7 @@ async function handleWeekText(ctx: Ctx, text: string): Promise<boolean> {
         return true;
     }
     if (parsed.errors.length) {
-        await ctx.reply(`⚠️ ${parsed.errors.join('\n')}\n\n예: 월/09:00-14:00,18:00-21:00 화/12:00-14:00 수/불가`);
+        await ctx.reply(`⚠️ ${parsed.errors.join('\n')}\n\n예:\n${WEEK_EXAMPLE}`);
         return true;
     }
     const p = await S.getEditablePeriod(a.org.id, a.userId);
@@ -717,25 +554,11 @@ async function handleWeekText(ctx: Ctx, text: string): Promise<boolean> {
         return true;
     }
     const [existing, settings] = await Promise.all([S.getSubmissions(p.id).then((m) => m.get(a.userId)), getSettings(a.org.id, MK)]);
-    // 적은 요일만 바꾸고, 안 적은 요일은 기존 제출 유지 (처음이면 활동 불가)
-    const days: S.WeekDays = Object.fromEntries(T.WEEKDAYS.map((w) => [w, parsed.days[w] ?? existing?.days[w] ?? { unavailable: true, slots: [] }]));
+    const days = await saveWeek(a.org.id, a.userId, p, parsed.days, existing?.days); // 적은 요일만 바꿈
+    await audit(a.org.id, a.userId, existing ? 'avail.update' : 'avail.submit', p.id, days);
     const untouched = T.WEEKDAYS.filter((w) => !parsed.days[w]);
-    const f: AvailFlow = {
-        kind: 'avail',
-        chatId: ctx.chat.id,
-        orgId: a.org.id,
-        periodId: p.id,
-        weekStart: p.week_start,
-        min: Number(settings.min_minutes) || T.DEFAULT_MIN_MINUTES,
-        day: 1,
-        days,
-        existed: !!existing,
-    };
-    (await session(ctx)).flow = f;
-    const note = untouched.length
-        ? `\n\nℹ️ 안 적은 요일(${untouched.map((w) => T.DAY_NAMES[w]).join(', ')}): ${existing ? '기존 제출 그대로' : '활동 불가로 표시'} — 바꾸려면 아래 요일 버튼`
-        : '';
-    await renderReview(ctx, f, note);
+    const note = untouched.length ? `\n\nℹ️ 안 적은 요일(${untouched.map((w) => T.DAY_NAMES[w]).join(', ')}): ${existing ? '기존 제출 그대로' : '활동 불가로 저장'}` : '';
+    await show(ctx, `✅ <b>활동 가능 시간 ${existing ? '수정' : '제출'} 완료</b> (${weekLabel(p.week_start)})\n\n${renderPersonWeek(p.week_start, days, Number(settings.min_minutes) || T.DEFAULT_MIN_MINUTES)}${note}`);
     return true;
 }
 
@@ -1254,8 +1077,8 @@ async function setRetention(ctx: Ctx, a: A, args: string) {
 const HELP_MEMBER =
     `🪖 <b>[${NAME} 사용법]</b> (대원: 단체방 · 관리자: 봇과 1:1 대화)\n\n` +
     '• <code>/특전대</code> — 메뉴\n' +
-    '• 활동 가능 시간 한 번에: <code>월/09:00-14:00,18:00-21:00 화/12:00-14:00 수/불가</code> (적은 요일만 바뀜, 처음 제출이면 안 적은 요일은 활동 불가)\n' +
-    '• <code>/특전대 제출</code> — 월~일 하루씩 버튼으로 제출·수정\n' +
+    '• <code>활동시간</code> (또는 <code>/특전대 제출</code>) — 활동 가능 시간 입력 창 열기 (월~일)\n' +
+    '• 단체방에 한 메시지로 보내도 됨: <code>월/12-14,18-20 화/15-18 수/불가</code> (적은 요일만 바뀜, 처음 제출이면 안 적은 요일은 활동 불가)\n' +
     '• <code>/특전대 내현황</code> — 내 요일별·주간 활동 가능 시간과 결과 건수\n' +
     '• <code>/특전대 결과</code> — 당일 결과 단계별 입력 (발굴건/찾기건 선택)\n' +
     '• <code>/특전대 내결과</code> — 최근 결과 확인·수정·삭제\n' +
@@ -1291,6 +1114,8 @@ export function registerSida(bot: Telegraf<any>) {
 
     bot.hears(/^[\/!](?:특전대|sd)(?:@\w+)?(?:\s+(\S+))?(?:\s+([\s\S]+))?$/i, run((ctx) => dispatch(ctx, ctx.match[1] || '', ctx.match[2] || '')));
     bot.hears(/^\/start(?:@\w+)?\s+sd$/, run((ctx) => dispatch(ctx)));
+    // '활동시간' 만 쳐도 입력 창 버튼 (텔레그램 정책상 앱은 버튼을 눌러야 열림)
+    bot.hears(/^[\/!]?활동\s*시간(?:@\w+)?$/, run((ctx) => dispatch(ctx, '제출')));
 
     bot.action(
         /^sd:(\w+)(?::(.*))?$/,
@@ -1304,7 +1129,6 @@ export function registerSida(bot: Telegraf<any>) {
             if (!a.org) return dispatch(ctx);
             const s = await session(ctx);
             const scoped = a as A;
-            if (op === 'av') return availCb(ctx, scoped, s, arg);
             if (op === 'rs') return resultCb(ctx, scoped, s, arg);
             // 관리자 보고서 버튼 — 버튼을 가지고 있어도 매번 서버에서 권한 확인
             if (!hasPerm(a, 'manager') || (op === 'td' && !hasPerm(a, 'pii'))) return void (await ctx.reply('⛔ 권한이 없습니다.'));
@@ -1345,7 +1169,6 @@ export function registerSida(bot: Telegraf<any>) {
             // 입력 중이라도 결과 양식 전체를 붙여넣으면 자동 정리로 시작 (시간 구간 '09:00~12:00' 은 양식 줄로 인식되지 않음)
             if (await handleFreeForm(ctx, text)) return;
             if (await handleWeekText(ctx, text)) return;
-            if (f?.kind === 'avail') return availText(ctx, f, text);
             if (f?.kind === 'result') return setField(ctx, f, text);
             return next();
         })

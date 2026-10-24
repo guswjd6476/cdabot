@@ -102,35 +102,19 @@ test('[13] 일반 대원은 관리자 전용 기능·데이터를 조회할 수 
     assert.match(await send(777, '/특전대 시간표'), /등록되어 있지 않습니다/);
 });
 
-test('[1-4][7] 활동 시간 제출 흐름 — 자유 구간, 겹침, 활동 불가, 자정 정책, 최종 확인', async () => {
+test('[1-4][7] 활동 시간 제출 — 한 메시지 입력, 겹침, 활동 불가, 자정 정책, 수정', async () => {
     assert.match(await send(101, '/특전대 제출'), /받는 주차가 없습니다/);
     assert.match(await send(ADMIN, '/특전대 주차시작 2026.10.26'), /10\/26~11\/1 주차 활동 시간 취합을 시작/);
-    assert.match(await send(101, '/특전대 제출'), /월요일 10\/26/);
-    assert.match(await send(101, '09:00~12:00, 14:00~17:00'), /합계\(겹침 제외\): <b>6시간<\/b> ✅ 충족/);
-    assert.match(await send(101, '22:00~02:00'), /자정을 넘는 구간은 지원하지 않으니/);
-    assert.match(await press(101, 'sd:av:nx'), /화요일/);
-    const tue = await send(101, '09:00-12:00\n11:00~14:00');
-    assert.match(tue, /<b>5시간<\/b> ⚠️ 미충족/);
-    assert.match(tue, /겹치는 시간은 한 번만/);
-    await press(101, 'sd:av:nx');
-    assert.match(await press(101, 'sd:av:un'), /활동 불가<\/b>로 표시/);
-    assert.match(await press(101, 'sd:av:nx'), /목요일/);
-    assert.match(await press(101, 'sd:av:nx'), /시간을 추가하거나/); // 빈 날은 넘어갈 수 없음
-    await press(101, 'sd:av:bs');
-    await press(101, 'sd:av:bh:9');
-    assert.match(await press(101, 'sd:av:be:9-11'), /09:00~11:00/); // 버튼 입력
-    assert.match(await send(101, '13:00~15:00, 19:00~21:00'), /<b>6시간<\/b> ✅/); // 3개 구간
-    await press(101, 'sd:av:nx');
-    await send(101, '10:00~13:00');
-    assert.match(await press(101, 'sd:av:nx'), /토요일/);
-    await press(101, 'sd:av:un');
-    assert.match(await press(101, 'sd:av:nx'), /일요일/);
-    await press(101, 'sd:av:un');
-    const review = await press(101, 'sd:av:nx');
-    assert.match(review, /제출 내용 확인/);
-    assert.match(review, /주간 활동 가능 시간 합계: <b>20시간<\/b>/); // 6+5+0+6+3
-    assert.match(review, /미달 요일: 화, 금/);
-    assert.match(await press(101, 'sd:av:ok'), /제출 완료/);
+    assert.match(await send(101, '/특전대 제출'), /한 메시지로 보내주세요[\s\S]*월\/12-14,18-20/); // 미니앱 미설정 → 입력 안내
+    assert.match(await send(101, '활동시간'), /한 메시지로 보내주세요/); // 짧은 명령
+    assert.match(await send(101, '월/22:00~02:00'), /자정을 넘는 구간은 지원하지 않으니/);
+    const out = await send(101, '월/09:00~12:00, 14:00~17:00\n화/09:00-12:00,11:00~14:00\n수/불가\n목/9-11,13:00~15:00,19:00~21:00\n금/10:00~13:00');
+    assert.match(out, /제출 완료/);
+    assert.match(out, /화 10\/27: .* <b>5시간<\/b> ⚠️ 미충족/); // 겹치는 시간은 한 번만
+    assert.match(out, /주간 활동 가능 시간 합계: <b>20시간<\/b>/); // 6+5+0+6+3
+    assert.match(out, /미달 요일: 화, 금/);
+    assert.match(out, /안 적은 요일\(토, 일\): 활동 불가로 저장/);
+    assert.ok(!calls.some((c) => c.payload?.reply_markup), '버튼 없음');
 
     const p = (await S.getPeriodByWeek(1, '2026-10-26'))!;
     const mine = (await S.getSubmissions(p.id)).get(await uid(101))!;
@@ -140,12 +124,8 @@ test('[1-4][7] 활동 시간 제출 흐름 — 자유 구간, 겹침, 활동 불
         [840, 1020],
     ]);
 
-    // 수정: 기존 제출 불러와 월요일 구간 1개 삭제 → 재제출 → 집계 갱신
-    assert.match(await send(101, '/특전대 제출'), /불러왔습니다/);
-    await press(101, 'sd:av:dl');
-    assert.match(await press(101, 'sd:av:di:1'), /<b>3시간<\/b> ⚠️ 미충족/);
-    for (let i = 0; i < 7; i++) await press(101, 'sd:av:nx');
-    assert.match(await press(101, 'sd:av:ok'), /수정 완료/);
+    // 수정: 월요일만 다시 보내면 월요일만 바뀌고 나머지는 그대로
+    assert.match(await send(101, '월/09:00~12:00'), /수정 완료[\s\S]*기존 제출 그대로/);
     assert.match(await send(101, '/특전대 내현황'), /주간 활동 가능 시간 합계: <b>17시간<\/b>/);
 });
 
@@ -189,18 +169,16 @@ test('[6][17] 12명 시간표 · 미제출 · 부족시간 · CSV, 시간표와 
 test('한 메시지로 일주일 활동 시간 입력 — 적은 요일만 반영, 처음이면 나머지는 활동 불가', async () => {
     const p = (await S.getPeriodByWeek(1, '2026-10-26'))!;
     assert.match(await send(211, '월/09:00-14:00,18:00 화/12:00-14:00'), /월요일: 형식을 알 수 없습니다: "18:00"/); // 끝 시각은 추측하지 않음
-    const review = await send(211, '월/09:00-14:00,18:00-21:00 화/12:00-14:00 수/불가');
-    assert.match(review, /제출 내용 확인/);
-    assert.match(review, /주간 활동 가능 시간 합계: <b>10시간<\/b>/);
-    assert.match(review, /안 적은 요일\(목, 금, 토, 일\): 활동 불가로 표시/);
-    assert.equal((await S.getSubmissions(p.id)).has(await uid(211)), false); // 최종 제출 전에는 저장 안 됨
-    assert.match(await press(211, 'sd:av:ok'), /제출 완료/);
+    assert.equal((await S.getSubmissions(p.id)).has(await uid(211)), false); // 틀리면 저장 안 됨
+    const out = await send(211, '월/09:00-14:00,18:00-21:00 화/12:00-14:00 수/불가');
+    assert.match(out, /제출 완료/);
+    assert.match(out, /주간 활동 가능 시간 합계: <b>10시간<\/b>/);
+    assert.match(out, /안 적은 요일\(목, 금, 토, 일\): 활동 불가로 저장/);
     const days = (await S.getSubmissions(p.id)).get(await uid(211))!.days;
     assert.deepEqual(days[1].slots, [[540, 840], [1080, 1260]]);
     assert.deepEqual([days[3].unavailable, days[7].unavailable], [true, true]);
     // 다시 보내면 적은 요일만 바뀌고 나머지는 기존 제출 유지
     assert.match(await send(211, '목/10-16'), /기존 제출 그대로/);
-    await press(211, 'sd:av:ok');
     const again = (await S.getSubmissions(p.id)).get(await uid(211))!.days;
     assert.deepEqual([again[1].slots, again[4].slots], [days[1].slots, [[600, 960]]]);
     assert.equal(await send(211, '월요일에 봐요'), ''); // 일반 대화는 무시
@@ -358,7 +336,7 @@ test('등록된 단체방에서는 가입 요청 없이 자동 대원 등록', a
     assert.match(await send(ADMIN, '/특전대 방등록', ++messageId, ROOM), /자동 등록/);
 
     assert.match(await send(707, '/특전대', ++messageId, ROOM), /U707 \(대원\)/); // 가입 요청했던 사람도 바로 활성
-    assert.match(await send(808, '/특전대 제출', ++messageId, ROOM), /활동 시간을 받는 주차|월요일/); // 처음 온 사람도 바로 사용
+    assert.match(await send(808, '/특전대 제출', ++messageId, ROOM), /활동 시간을 받는 주차|한 메시지로 보내주세요/); // 처음 온 사람도 바로 사용
     const m = (await getMember(1, S.MODULE_KEY, { telegramId: '808' }))!;
     assert.equal(m.status, 'active');
     assert.deepEqual(m.perms, ['member']); // 관리자 권한은 자동으로 주지 않음
@@ -391,10 +369,10 @@ test('미니앱 입력 창 — 텔레그램 서명 확인, 단체방 사람만, 
     await send(ADMIN, '/특전대 방등록', ++messageId, ROOM);
     process.env.MINIAPP_URL = 'https://t.me/sidabot/time';
     try {
-        await send(951, '/특전대 제출', ++messageId, ROOM);
+        await send(951, '활동시간', ++messageId, ROOM);
         const url = calls.flatMap((c) => c.payload?.reply_markup?.inline_keyboard?.flat() ?? []).find((b: any) => b.url)?.url;
         assert.equal(url, 'https://t.me/sidabot/time?startapp=g-100888');
-        assert.match(await press(951, 'sd:a:채팅제출~951', ROOM), /월요일/); // 채팅 입력도 그대로 가능
+        assert.deepEqual(labels(), ['📝 활동 시간 입력 창 열기']); // 버튼은 입력 창 하나만
     } finally {
         delete process.env.MINIAPP_URL;
     }
@@ -443,14 +421,9 @@ test('[18] 새 주차가 지난 주차를 덮어쓰지 않음 · 마감/재개�
     const p1 = (await S.getPeriodByWeek(1, '2026-10-26'))!;
     const before1 = JSON.stringify([...(await S.getSubmissions(p1.id)).entries()].map(([k, v]) => [k, v.days]));
     await send(ADMIN, '/특전대 주차시작 2026.11.2');
-    assert.doesNotMatch(await send(101, '/특전대 제출'), /불러왔습니다/); // 새 주차는 빈 상태로 시작
-    await send(101, '08:00~14:00');
-    for (let i = 0; i < 6; i++) {
-        await press(101, 'sd:av:nx');
-        await press(101, 'sd:av:un');
-    }
-    await press(101, 'sd:av:nx');
-    assert.match(await press(101, 'sd:av:ok'), /11\/2~11\/8/);
+    const out = await send(101, '월/08:00~14:00');
+    assert.match(out, /제출 완료<\/b> \(11\/2~11\/8\)/); // 새 주차는 빈 상태로 시작 → '수정'이 아니라 '제출'
+    assert.match(out, /화, 수, 목, 금, 토, 일\): 활동 불가로 저장/);
     const p2 = (await S.getPeriodByWeek(1, '2026-11-02'))!;
     assert.equal(JSON.stringify([...(await S.getSubmissions(p1.id)).entries()].map(([k, v]) => [k, v.days])), before1);
     assert.deepEqual((await S.getSubmissions(p2.id)).get(await uid(101))!.days[1].slots, [[480, 840]]);
