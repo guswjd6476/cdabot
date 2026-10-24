@@ -697,35 +697,57 @@ async function todayReport(ctx: Ctx, a: A, args: string) {
     const date = parseFlexibleDate(args) || today();
     const { html, results } = await todayHtml(a.org.id, date);
     const buttons: Buttons = hasPerm(a, 'pii') && results.length ? [[btn('📇 상세 결과 (개인정보)', `sd:td:${date}`)]] : [];
-    await show(ctx, html, buttons);
+    await show(ctx, `${html}\n\n<b>6. 당일 항목별 집계</b>\n${resultStats(results)}`, buttons);
 }
 
-// 일일 현황 (이름·연락처 같은 개인정보 없음 → 단체방 현황판에도 사용)
+const kindCount = (rows: S.ResultRow[]) => `발 ${rows.filter((r) => r.kind === 'dig').length}건 · 찾 ${rows.filter((r) => r.kind === 'find').length}건`;
+
+// 대원별 '이름: 발 n건 · 찾 n건' (많은 순)
+function perPerson(rows: S.ResultRow[], members: Membership[]) {
+    const names = new Map(members.map((m) => [m.user_id, m.display_name]));
+    const by = new Map<number, S.ResultRow[]>();
+    for (const r of rows) by.set(r.user_id, [...(by.get(r.user_id) || []), r]);
+    const lines = [...by.entries()]
+        .sort((x, y) => y[1].length - x[1].length)
+        .map(([uid, rs]) => `• ${e(names.get(uid) || rs[0].submitter || '?')}: ${kindCount(rs)}`);
+    return lines.join('\n') || '• 아직 없습니다.';
+}
+
+// 일일 현황 (결과 대상자 이름·연락처 같은 개인정보 없음 → 단체방 현황판에도 사용)
 async function todayHtml(orgId: number, date: string) {
+    const ws = weekStartOf(date);
     const w = weekdayOf(date);
-    const period = await S.getPeriodByWeek(orgId, weekStartOf(date));
-    const [{ members, subs, min }, results] = await Promise.all([loadWeek(orgId, period), S.listResults(orgId, { from: date, to: date })]);
+    const period = await S.getPeriodByWeek(orgId, ws);
+    const [{ members, subs, min }, week] = await Promise.all([loadWeek(orgId, period), S.listResults(orgId, { from: ws, to: date })]);
+    const results = week.filter((r) => r.activity_date === date);
     const people = weekTable(members, subs, min, w).people;
     const count = (st: T.DayStatus) => people.filter((p) => p.status === st).length;
-    const byUser = new Map<number, number>();
-    for (const r of results) byUser.set(r.user_id, (byUser.get(r.user_id) || 0) + 1);
 
     let html = `📈 <b>[${NAME} 일일 현황] ${date} (${'일월화수목금토'[dayjs(date).day()]})</b>\n생성 시각: ${nowKst().format('YYYY-MM-DD HH:mm')}\n`;
-    html += `\n<b>1. 활동 가능 시간</b>\n• 등록 대원: ${members.length}명\n`;
+    html += `\n<b>1. 당일 결과</b> — 총 ${results.length}건 (${kindCount(results)})\n${perPerson(results, members)}`;
+    const none = members.filter((m) => !results.some((r) => r.user_id === m.user_id));
+    if (results.length && none.length) html += `\n• 0건: ${none.map((m) => e(m.display_name)).join(', ')}`;
+    html += `\n\n<b>2. 이번 주 누적</b> (${dayjs(ws).format('M/D')}~${dayjs(date).format('M/D')}) — 총 ${week.length}건 (${kindCount(week)})\n${perPerson(week, members)}`;
+    html += `\n\n<b>3. 요일별</b>\n${T.WEEKDAYS.filter((d) => d <= w)
+        .map((d) => {
+            const ymd = dateOf(ws, d).format('YYYY-MM-DD');
+            return `• ${T.DAY_NAMES[d]} ${dateOf(ws, d).format('M/D')}: ${kindCount(week.filter((r) => r.activity_date === ymd))}`;
+        })
+        .join('\n')}`;
+    html += `\n\n<b>4. 활동 가능 시간</b>\n• 등록 대원: ${members.length}명\n`;
     if (!period) html += '• 이 주차는 취합이 시작되지 않았습니다.\n';
     else
         html +=
             `• 제출 완료: ${people.length - count('missing')}명 · 미제출: ${count('missing')}명\n` +
             `• ${T.fmtHours(min)} 충족: ${count('ok')}명 · 미충족: ${count('short')}명 · 활동 불가: ${count('unavailable')}명\n`;
-    html += `\n<b>2. 개인별</b> (가능 시간 / 당일 결과 건수)\n`;
+    html += `\n<b>5. 개인별 오늘 가능 시간</b>\n`;
     html += members
         .map((m, i) => {
             const p = people[i];
             const avail = !p ? '-' : p.status === 'missing' || p.status === 'unavailable' ? T.STATUS_LABEL[p.status] : `${T.fmtHours(p.minutes)} ${T.STATUS_LABEL[p.status]}`;
-            return `• ${e(m.display_name)}: ${avail} / 결과 ${byUser.get(m.user_id) || 0}건`;
+            return `• ${e(m.display_name)}: ${avail}`;
         })
         .join('\n');
-    html += `\n\n<b>3. 당일 결과</b> — 총 ${results.length}건\n${resultStats(results)}`;
     return { html, results };
 }
 

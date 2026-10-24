@@ -264,13 +264,18 @@ test('[10][12] 결과 수정이 일일 보고서·검색에 반영, 가능 시�
     const log = (await query(`SELECT detail FROM cdabot_audit_logs WHERE action = 'result.update';`)).rows[0].detail;
     assert.deepEqual(log, { changed: ['region'] }); // 감사 로그에 개인정보 값은 남기지 않음
 
+    // 이번 주 앞선 날 결과 1건 (누적·요일별 확인용)
+    const ws = nowKst().startOf('day').subtract((nowKst().day() + 6) % 7, 'day');
+    const monId = (await S.insertResult({ orgId: 1, userId: await uid(205), kind: 'find', date: ws.format('YYYY-MM-DD'), values: { name: '월요일' }, dedupKey: 't:mon' }))!;
     const day = await send(ADMIN, '/특전대 오늘현황');
-    assert.match(day, /당일 결과<\/b> — 총 4건/);
+    assert.match(day, /1\. 당일 결과<\/b> — 총 4건 \(발 3건 · 찾 1건\)\n• U101: 발 3건 · 찾 1건\n• 0건: /); // 대원별
+    assert.match(day, /2\. 이번 주 누적<\/b> \(.*\) — 총 5건 \(발 3건 · 찾 2건\)\n• U101: 발 3건 · 찾 1건\n• 대원05: 발 0건 · 찾 1건/);
+    if (ws.format('YYYY-MM-DD') !== nowKst().format('YYYY-MM-DD')) assert.match(day, /3\. 요일별<\/b>\n• 월 .*: 발 0건 · 찾 1건/);
+    await S.deleteResult(1, monId);
     assert.match(day, /<b>발굴건<\/b> 3건[\s\S]*<b>찾기건<\/b> 1건\n• 인도지역: 대전 1/);
     const regionLine = day.match(/인도지역: (.*)/)![1]; // 발굴건 쪽
     assert.deepEqual(regionLine.split(' · ').sort(), ['대구 1', '부산 1', '서울 1']); // 수정 전 값(서울→대구)은 사라짐
     assert.match(day, /인도팀: (1팀 1 · 2팀 1|2팀 1 · 1팀 1) · \(미입력\) 1/); // 미입력은 맨 뒤 별도
-    assert.match(day, /U101: .* \/ 결과 4건/);
     assert.match(await send(ADMIN, '/특전대 결과검색 인도지역:대구'), /총 <b>1<\/b>건/);
     assert.match(await send(ADMIN, `/특전대 결과검색 기간:${TODAY}~${TODAY} 도구:전단`), /총 <b>2<\/b>건/);
     assert.match(await send(ADMIN, '/특전대 결과검색 종류:찾기'), /총 <b>1<\/b>건/);
@@ -418,7 +423,8 @@ test('주제방 현황판 — 한 메시지를 계속 갱신, 날짜 바뀌면 �
     assert.match((await topic(101, '/특전대 현황판', 7)).map((c) => c.payload.text).join(), /권한이 없습니다/); // 대원은 불가
     const made = (await topic(ADMIN, '/특전대 현황판', 7)).find((c) => c.method === 'sendMessage')!;
     assert.equal(made.payload.message_thread_id, 7); // 현황판 주제에 올라감
-    assert.match(made.payload.text, /실시간 현황판[\s\S]*당일 결과<\/b> — 총/);
+    assert.match(made.payload.text, /실시간 현황판[\s\S]*당일 결과<\/b> — 총[\s\S]*이번 주 누적[\s\S]*요일별/);
+    assert.ok(!made.payload.text.includes('항목별 집계'), '현황판은 대원별 건수 중심');
     assert.ok(!/010-|1234/.test(made.payload.text), '현황판에 연락처 없음');
     const board = (await getSettings(1, S.MODULE_KEY)).board;
     assert.deepEqual([board.chatId, board.threadId, board.date], [ROOM, 7, nowKst().format('YYYY-MM-DD')]);
@@ -428,7 +434,7 @@ test('주제방 현황판 — 한 메시지를 계속 갱신, 날짜 바뀌면 �
     assert.equal(posted.find((c) => c.method === 'sendMessage')!.payload.message_thread_id, 9);
     const edit = posted.find((c) => c.method === 'editMessageText')!;
     assert.deepEqual([edit.payload.chat_id, edit.payload.message_id], [ROOM, board.messageId]);
-    assert.match(edit.payload.text, /U101: .* \/ 결과 \d+건/);
+    assert.match(edit.payload.text, /당일 결과<\/b> — 총 \d+건[^\n]*[\s\S]*• U101: 발 \d+건 · 찾 \d+건/);
 
     await setSetting(1, S.MODULE_KEY, 'board', { ...board, date: '2000-01-01' }); // 날짜가 바뀐 것처럼
     const next = await topic(101, '/활동시간 일/10-12', 9);
