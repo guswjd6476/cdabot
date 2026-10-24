@@ -11,9 +11,7 @@ import { query, runMigrations, setQueryable } from '../db';
 import { registerCore } from '../core/engine';
 import { createOrg, getMember, loadSession, saveSession, upsertMembership, upsertUser } from '../core/store';
 import { nowKst } from '../utils';
-import { appApi, registerSida } from './bot';
-import { verifyInitData } from './webapp';
-import { createHmac } from 'crypto';
+import { registerSida } from './bot';
 import * as S from './store';
 
 const ADMIN = 9000; // test-setup 의 ADMIN_IDS
@@ -26,7 +24,6 @@ let calls: Call[] = [];
     calls.push({ method, payload });
     if (method === 'getMe') return { id: 1, is_bot: true, first_name: 'sida', username: 'sidabot' };
     if (method === 'answerCallbackQuery') return true;
-    if (method === 'getChatMember') return { status: payload.user_id === 952 ? 'left' : 'member' };
     return { message_id: calls.length, date: 0, chat: { id: payload.chat_id, type: 'private' }, text: payload.text };
 };
 
@@ -105,10 +102,10 @@ test('[13] 일반 대원은 관리자 전용 기능·데이터를 조회할 수 
 test('[1-4][7] 활동 시간 제출 — 한 메시지 입력, 겹침, 활동 불가, 자정 정책, 수정', async () => {
     assert.match(await send(101, '/특전대 제출'), /받는 주차가 없습니다/);
     assert.match(await send(ADMIN, '/특전대 주차시작 2026.10.26'), /10\/26~11\/1 주차 활동 시간 취합을 시작/);
-    assert.match(await send(101, '/특전대 제출'), /한 메시지로 보내주세요[\s\S]*월\/12-14,18-20/); // 미니앱 미설정 → 입력 안내
-    assert.match(await send(101, '활동시간'), /한 메시지로 보내주세요/); // 짧은 명령
-    assert.match(await send(101, '월/22:00~02:00'), /자정을 넘는 구간은 지원하지 않으니/);
-    const out = await send(101, '월/09:00~12:00, 14:00~17:00\n화/09:00-12:00,11:00~14:00\n수/불가\n목/9-11,13:00~15:00,19:00~21:00\n금/10:00~13:00');
+    assert.match(await send(101, '/특전대 제출'), /\/활동시간\n월\/12-14,18-20/); // 양식 안내
+    assert.match(await send(101, '/활동시간'), /한 줄에 한 요일/); // 상위 명령만 보내면 안내
+    assert.match(await send(101, '/활동시간\n월/22:00~02:00'), /자정을 넘는 구간은 지원하지 않으니/);
+    const out = await send(101, '/활동시간\n월/09:00~12:00, 14:00~17:00\n화/09:00-12:00,11:00~14:00\n수/불가\n목/9-11,13:00~15:00,19:00~21:00\n금/10:00~13:00');
     assert.match(out, /제출 완료/);
     assert.match(out, /화 10\/27: .* <b>5시간<\/b> ⚠️ 미충족/); // 겹치는 시간은 한 번만
     assert.match(out, /주간 활동 가능 시간 합계: <b>20시간<\/b>/); // 6+5+0+6+3
@@ -125,7 +122,7 @@ test('[1-4][7] 활동 시간 제출 — 한 메시지 입력, 겹침, 활동 불
     ]);
 
     // 수정: 월요일만 다시 보내면 월요일만 바뀌고 나머지는 그대로
-    assert.match(await send(101, '월/09:00~12:00'), /수정 완료[\s\S]*기존 제출 그대로/);
+    assert.match(await send(101, '/활동시간 월/09:00~12:00'), /수정 완료[\s\S]*기존 제출 그대로/);
     assert.match(await send(101, '/특전대 내현황'), /주간 활동 가능 시간 합계: <b>17시간<\/b>/);
 });
 
@@ -168,9 +165,9 @@ test('[6][17] 12명 시간표 · 미제출 · 부족시간 · CSV, 시간표와 
 
 test('한 메시지로 일주일 활동 시간 입력 — 적은 요일만 반영, 처음이면 나머지는 활동 불가', async () => {
     const p = (await S.getPeriodByWeek(1, '2026-10-26'))!;
-    assert.match(await send(211, '월/09:00-14:00,18:00 화/12:00-14:00'), /월요일: 형식을 알 수 없습니다: "18:00"/); // 끝 시각은 추측하지 않음
+    assert.match(await send(211, '/활동시간\n월/09:00-14:00,18:00 화/12:00-14:00'), /월요일: 형식을 알 수 없습니다: "18:00"/); // 끝 시각은 추측하지 않음
     assert.equal((await S.getSubmissions(p.id)).has(await uid(211)), false); // 틀리면 저장 안 됨
-    const out = await send(211, '월/09:00-14:00,18:00-21:00 화/12:00-14:00 수/불가');
+    const out = await send(211, '/활동시간\n월/09:00-14:00,18:00-21:00 화/12:00-14:00 수/불가');
     assert.match(out, /제출 완료/);
     assert.match(out, /주간 활동 가능 시간 합계: <b>10시간<\/b>/);
     assert.match(out, /안 적은 요일\(목, 금, 토, 일\): 활동 불가로 저장/);
@@ -178,10 +175,12 @@ test('한 메시지로 일주일 활동 시간 입력 — 적은 요일만 반�
     assert.deepEqual(days[1].slots, [[540, 840], [1080, 1260]]);
     assert.deepEqual([days[3].unavailable, days[7].unavailable], [true, true]);
     // 다시 보내면 적은 요일만 바뀌고 나머지는 기존 제출 유지
-    assert.match(await send(211, '목/10-16'), /기존 제출 그대로/);
+    assert.match(await send(211, '/활동시간 목/10-16'), /기존 제출 그대로/);
     const again = (await S.getSubmissions(p.id)).get(await uid(211))!.days;
     assert.deepEqual([again[1].slots, again[4].slots], [days[1].slots, [[600, 960]]]);
     assert.equal(await send(211, '월요일에 봐요'), ''); // 일반 대화는 무시
+    assert.equal(await send(211, '월/9-12 화/불가'), ''); // /활동시간 없이 보낸 양식도 무시 (대화와 안 섞이게)
+    assert.match(await send(211, '/활동시간 내일 할게요'), /요일\/시간 형식으로/);
     await S.saveSubmission(p.id, await uid(211), {}); // 이후 테스트 기준(대원11 미제출) 유지
 });
 
@@ -336,7 +335,7 @@ test('등록된 단체방에서는 가입 요청 없이 자동 대원 등록', a
     assert.match(await send(ADMIN, '/특전대 방등록', ++messageId, ROOM), /자동 등록/);
 
     assert.match(await send(707, '/특전대', ++messageId, ROOM), /U707 \(대원\)/); // 가입 요청했던 사람도 바로 활성
-    assert.match(await send(808, '/특전대 제출', ++messageId, ROOM), /활동 시간을 받는 주차|한 메시지로 보내주세요/); // 처음 온 사람도 바로 사용
+    assert.match(await send(808, '/특전대 제출', ++messageId, ROOM), /활동 시간을 받는 주차|한 줄에 한 요일/); // 처음 온 사람도 바로 사용
     const m = (await getMember(1, S.MODULE_KEY, { telegramId: '808' }))!;
     assert.equal(m.status, 'active');
     assert.deepEqual(m.perms, ['member']); // 관리자 권한은 자동으로 주지 않음
@@ -348,53 +347,6 @@ test('등록된 단체방에서는 가입 요청 없이 자동 대원 등록', a
     assert.match(await send(ADMIN, '/특전대 방해제', ++messageId, ROOM), /해제/);
     assert.match(await send(919, '/특전대', ++messageId, ROOM), /등록되어 있지 않습니다/);
     await send(ADMIN, '/특전대 비활성 707'); // 다음 테스트 인원 수에 영향 없게
-});
-
-test('미니앱 입력 창 — 텔레그램 서명 확인, 단체방 사람만, 보이는 그대로 저장', async () => {
-    // 서명 확인: 맞는 서명만 통과, 값을 바꾸면 거절
-    const sign = (fields: Record<string, string>, token = '1:TEST') => {
-        const check = Object.keys(fields).sort().map((k) => `${k}=${fields[k]}`).join('\n');
-        const hash = createHmac('sha256', createHmac('sha256', 'WebAppData').update(token).digest()).update(check).digest('hex');
-        return new URLSearchParams({ ...fields, hash }).toString();
-    };
-    const fields = { auth_date: String(Math.floor(Date.now() / 1000)), user: JSON.stringify({ id: 951, first_name: '앱' }), start_param: 'g-100888' };
-    assert.equal(verifyInitData(sign(fields), '1:TEST')!.user.id, 951);
-    assert.equal(verifyInitData(sign(fields).replace('951', '952'), '1:TEST'), null);
-    assert.equal(verifyInitData(sign(fields, '2:OTHER'), '1:TEST'), null);
-    assert.equal(verifyInitData(sign({ ...fields, auth_date: '1000' }), '1:TEST'), null); // 오래된 서명
-
-    const ROOM = -100888;
-    const tg = bot.telegram;
-    assert.match((await appApi(tg, { id: 951 }, 'g-100888')).error!, /단체방의 버튼/); // 등록 안 된 방
-    await send(ADMIN, '/특전대 방등록', ++messageId, ROOM);
-    process.env.MINIAPP_URL = 'https://t.me/sidabot/time';
-    try {
-        await send(951, '활동시간', ++messageId, ROOM);
-        const url = calls.flatMap((c) => c.payload?.reply_markup?.inline_keyboard?.flat() ?? []).find((b: any) => b.url)?.url;
-        assert.equal(url, 'https://t.me/sidabot/time?startapp=g-100888');
-        assert.deepEqual(labels(), ['📝 활동 시간 입력 창 열기']); // 버튼은 입력 창 하나만
-    } finally {
-        delete process.env.MINIAPP_URL;
-    }
-    assert.match((await appApi(tg, { id: 952 }, 'g-100888')).error!, /대원만/); // 링크만 알고 단체방에 없는 사람
-    assert.equal(await getMember(1, S.MODULE_KEY, { telegramId: '952' }), undefined);
-
-    const load = await appApi(tg, { id: 951, first_name: '앱' }, 'g-100888');
-    assert.deepEqual([load.week, load.text], ['10/26~11/1', '']);
-    assert.match((await appApi(tg, { id: 951 }, 'g-100888', '월/12-14,18')).error!, /월요일: 형식/);
-    const saved = await appApi(tg, { id: 951 }, 'g-100888', '월/12-14,18-20\n화/15-18,19-21\n수/불가\n목/11-19\n금/11-20\n토/10-20');
-    assert.equal(saved.done, '제출');
-    assert.match(saved.html!, /주간 활동 가능 시간 합계: <b>36시간<\/b>/); // 4+5+0+8+9+10, 일요일은 불가
-    const p = (await S.getPeriodByWeek(1, '2026-10-26'))!;
-    const days = (await S.getSubmissions(p.id)).get((await getMember(1, S.MODULE_KEY, { telegramId: '951' }))!.user_id)!.days;
-    assert.deepEqual([days[1].slots, days[3].unavailable, days[7].unavailable], [[[720, 840], [1080, 1200]], true, true]);
-    // 다시 열면 제출한 내용이 채워져 있고, 그대로 다시 저장해도 같음
-    const again = await appApi(tg, { id: 951 }, 'g-100888');
-    assert.match(again.text!, /^월\/12:00-14:00,18:00-20:00\n화\/15:00-18:00,19:00-21:00\n수\/불가/);
-    assert.equal((await appApi(tg, { id: 951 }, 'g-100888', again.text)).done, '수정');
-
-    await send(ADMIN, '/특전대 방해제', ++messageId, ROOM);
-    await send(ADMIN, '/특전대 비활성 951');
 });
 
 test('[14] 조직별 데이터 분리', async () => {
@@ -421,7 +373,7 @@ test('[18] 새 주차가 지난 주차를 덮어쓰지 않음 · 마감/재개�
     const p1 = (await S.getPeriodByWeek(1, '2026-10-26'))!;
     const before1 = JSON.stringify([...(await S.getSubmissions(p1.id)).entries()].map(([k, v]) => [k, v.days]));
     await send(ADMIN, '/특전대 주차시작 2026.11.2');
-    const out = await send(101, '월/08:00~14:00');
+    const out = await send(101, '/활동시간\n월/08:00~14:00');
     assert.match(out, /제출 완료<\/b> \(11\/2~11\/8\)/); // 새 주차는 빈 상태로 시작 → '수정'이 아니라 '제출'
     assert.match(out, /화, 수, 목, 금, 토, 일\): 활동 불가로 저장/);
     const p2 = (await S.getPeriodByWeek(1, '2026-11-02'))!;

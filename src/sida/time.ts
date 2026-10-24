@@ -105,12 +105,6 @@ export function parseWeekText(raw: string): { days: Record<number, DayInput>; er
     return { days, errors };
 }
 
-// parseWeekText 로 다시 읽을 수 있는 글 (입력 창에 기존 제출 채우기용)
-export const weekToText = (days: Record<number, DayInput | undefined>) =>
-    WEEKDAYS.filter((w) => days[w])
-        .map((w) => `${DAY_NAMES[w]}/${days[w]!.unavailable ? '불가' : days[w]!.slots.map(([s, e]) => `${fmtClock(s)}-${fmtClock(e)}`).join(',')}`)
-        .join('\n');
-
 export interface Segment {
     start: number;
     end: number;

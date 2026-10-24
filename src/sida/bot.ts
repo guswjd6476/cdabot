@@ -267,22 +267,14 @@ async function decideJoin(ctx: Ctx, a: Access, arg: string, approve: boolean) {
 
 const WEEK_EXAMPLE = '월/12-14,18-20\n화/15-18,19-21\n수/불가\n목/11-19\n금/11-20\n토/10-20';
 
-// 미니앱이 설정돼 있으면 입력 창 버튼, 아니면 한 메시지 입력 안내
+// '/활동시간' 만 보내면 양식 안내
 async function startAvail(ctx: Ctx, a: A) {
     const p = await S.getEditablePeriod(a.org.id, a.userId);
     if (!p) return void (await ctx.reply('⏳ 지금은 활동 시간을 받는 주차가 없습니다 (마감되었거나 시작 전). 관리자에게 문의해주세요.'));
-    const app = process.env.MINIAPP_URL;
-    if (app) return show(ctx, `📝 <b>${weekLabel(p.week_start)} 활동 시간</b>\n아래 버튼을 누르면 입력 창이 열립니다. 입력한 내용은 단체방 대화에 올라가지 않습니다.`, [
-        [Markup.button.url('📝 활동 시간 입력 창 열기', `${app}?startapp=g${ctx.chat.id}`)],
-    ]);
-    await show(ctx, `📝 <b>${weekLabel(p.week_start)} 활동 시간</b>\n이렇게 한 메시지로 보내주세요 (한 줄에 한 요일, 시간 여러 개는 쉼표, 못 하는 날은 불가):\n\n<code>${WEEK_EXAMPLE}</code>\n\n처음 제출이면 안 적은 요일은 활동 불가, 이미 제출했다면 적은 요일만 바뀝니다.`);
-}
-
-// 미니앱·채팅 공통 저장. 안 적은 요일은 base(기존 제출) 값, 없으면 활동 불가
-async function saveWeek(orgId: number, userId: number, p: S.Period, entered: Record<number, T.DayInput>, base?: S.WeekDays) {
-    const days: S.WeekDays = Object.fromEntries(T.WEEKDAYS.map((w) => [w, entered[w] ?? base?.[w] ?? { unavailable: true, slots: [] }]));
-    await S.saveSubmission(p.id, userId, days);
-    return days;
+    await show(
+        ctx,
+        `📝 <b>${weekLabel(p.week_start)} 활동 시간</b>\n아래처럼 <b>/활동시간</b> 밑에 한 줄에 한 요일씩 적어 보내주세요 (시간 여러 개는 쉼표, 못 하는 날은 불가):\n\n<code>/활동시간\n${WEEK_EXAMPLE}</code>\n\n처음 제출이면 안 적은 요일은 활동 불가, 이미 제출했다면 적은 요일만 바뀝니다.`
+    );
 }
 
 async function myStatus(ctx: Ctx, a: A) {
@@ -501,65 +493,22 @@ async function resultCb(ctx: Ctx, a: A, s: Record<string, any>, arg: string) {
     await askNext(ctx, f);
 }
 
-// 미니앱 입력 창 API. text 없으면 불러오기, 있으면 저장 (입력 창에 보이는 그대로 저장 — 안 적은 요일은 활동 불가)
-// from 과 startParam 은 webapp.ts 에서 텔레그램 서명을 확인한 값
-export async function appApi(telegram: Telegraf['telegram'], from: { id: number; first_name?: string; last_name?: string }, startParam: string, text?: string) {
-    const chatId = Number(/^g(-\d+)$/.exec(startParam)?.[1]);
-    const orgId = chatId ? await getGroupOrg(chatId, MK) : undefined;
-    if (!orgId) return { error: '특전대 단체방의 버튼으로 열어주세요.' };
-    const name = [from.first_name, from.last_name].filter(Boolean).join(' ') || String(from.id);
-    const user = await upsertUser(from.id, name);
-    let m = await getMember(orgId, MK, { telegramId: String(from.id) });
-    if (m?.status !== 'active') {
-        // 링크만 알아서는 등록되지 않도록, 실제 단체방 사람인지 텔레그램에 확인한 뒤 자동 등록
-        const cm: any = await telegram.getChatMember(chatId, from.id).catch(() => null);
-        if (!cm || !(['creator', 'administrator', 'member'].includes(cm.status) || cm.is_member)) return { error: '특전대 단체방 대원만 사용할 수 있습니다.' };
-        if (await autoEnroll(orgId, user.id, MK, name)) await audit(orgId, user.id, 'member.auto_enroll', chatId);
-        m = await getMember(orgId, MK, { telegramId: String(from.id) });
-        if (m?.status !== 'active') return { error: '대원 등록이 비활성 상태입니다. 관리자에게 문의해주세요.' };
-    }
-    const p = await S.getEditablePeriod(orgId, user.id);
-    if (!p) return { error: '⏳ 지금은 활동 시간을 받는 주차가 없습니다 (마감되었거나 시작 전). 관리자에게 문의해주세요.' };
-    const [existing, settings] = await Promise.all([S.getSubmissions(p.id).then((x) => x.get(user.id)), getSettings(orgId, MK)]);
-    const week = weekLabel(p.week_start);
-    if (text === undefined) return { week, name: m.display_name, text: existing ? T.weekToText(existing.days) : '' };
-    const parsed = T.parseWeekText(text);
-    if (!parsed) return { error: '요일/시간 형식으로 적어주세요. 예: 월/12-14,18-20' };
-    if (parsed.errors.length) return { error: parsed.errors.join('\n') };
-    const days = await saveWeek(orgId, user.id, p, parsed.days); // 입력 창에 보이는 그대로
-    await audit(orgId, user.id, existing ? 'avail.update' : 'avail.submit', p.id, days);
-    return { week, done: existing ? '수정' : '제출', html: renderPersonWeek(p.week_start, days, Number(settings.min_minutes) || T.DEFAULT_MIN_MINUTES) };
-}
-
-// 단체방에 '월/12-14,18-20 화/…' 한 메시지 → 바로 저장
-async function handleWeekText(ctx: Ctx, text: string): Promise<boolean> {
-    const parsed = T.parseWeekText(text);
-    if (!parsed) return false;
-    if (inPrivate(ctx)) {
-        await ctx.reply(MSG_GO_GROUP);
-        return true;
-    }
+// 단체방에 '/활동시간' + 요일별 줄 → 처음이면 저장, 이미 냈으면 적은 요일만 수정
+async function handleWeekText(ctx: Ctx, text: string) {
+    if (inPrivate(ctx)) return void (await ctx.reply(MSG_GO_GROUP));
     const a = await access(ctx);
-    if (!a.org || !hasPerm(a, 'member')) {
-        await ctx.reply('🪖 활동 시간을 제출하려면 먼저 특전대 대원 등록이 필요합니다. /특전대 를 눌러주세요.');
-        return true;
-    }
-    if (parsed.errors.length) {
-        await ctx.reply(`⚠️ ${parsed.errors.join('\n')}\n\n예:\n${WEEK_EXAMPLE}`);
-        return true;
-    }
+    if (!a.org || !hasPerm(a, 'member')) return void (await ctx.reply('🪖 활동 시간을 제출하려면 먼저 특전대 대원 등록이 필요합니다. /특전대 를 눌러주세요.'));
+    const parsed = T.parseWeekText(text);
+    if (!parsed || parsed.errors.length) return void (await ctx.reply(`⚠️ ${parsed?.errors.join('\n') || '요일/시간 형식으로 적어주세요.'}\n\n예:\n/활동시간\n${WEEK_EXAMPLE}`));
     const p = await S.getEditablePeriod(a.org.id, a.userId);
-    if (!p) {
-        await ctx.reply('⏳ 지금은 활동 시간을 받는 주차가 없습니다 (마감되었거나 시작 전). 관리자에게 문의해주세요.');
-        return true;
-    }
+    if (!p) return void (await ctx.reply('⏳ 지금은 활동 시간을 받는 주차가 없습니다 (마감되었거나 시작 전). 관리자에게 문의해주세요.'));
     const [existing, settings] = await Promise.all([S.getSubmissions(p.id).then((m) => m.get(a.userId)), getSettings(a.org.id, MK)]);
-    const days = await saveWeek(a.org.id, a.userId, p, parsed.days, existing?.days); // 적은 요일만 바꿈
+    const days: S.WeekDays = Object.fromEntries(T.WEEKDAYS.map((w) => [w, parsed.days[w] ?? existing?.days[w] ?? { unavailable: true, slots: [] }]));
+    await S.saveSubmission(p.id, a.userId, days);
     await audit(a.org.id, a.userId, existing ? 'avail.update' : 'avail.submit', p.id, days);
     const untouched = T.WEEKDAYS.filter((w) => !parsed.days[w]);
     const note = untouched.length ? `\n\nℹ️ 안 적은 요일(${untouched.map((w) => T.DAY_NAMES[w]).join(', ')}): ${existing ? '기존 제출 그대로' : '활동 불가로 저장'}` : '';
     await show(ctx, `✅ <b>활동 가능 시간 ${existing ? '수정' : '제출'} 완료</b> (${weekLabel(p.week_start)})\n\n${renderPersonWeek(p.week_start, days, Number(settings.min_minutes) || T.DEFAULT_MIN_MINUTES)}${note}`);
-    return true;
 }
 
 // 단체방에 '발/…' 또는 '찾/…' 양식 → 자동 정리 후 빠지거나 틀린 칸만 질문
@@ -1077,8 +1026,7 @@ async function setRetention(ctx: Ctx, a: A, args: string) {
 const HELP_MEMBER =
     `🪖 <b>[${NAME} 사용법]</b> (대원: 단체방 · 관리자: 봇과 1:1 대화)\n\n` +
     '• <code>/특전대</code> — 메뉴\n' +
-    '• <code>활동시간</code> (또는 <code>/특전대 제출</code>) — 활동 가능 시간 입력 창 열기 (월~일)\n' +
-    '• 단체방에 한 메시지로 보내도 됨: <code>월/12-14,18-20 화/15-18 수/불가</code> (적은 요일만 바뀜, 처음 제출이면 안 적은 요일은 활동 불가)\n' +
+    '• 활동 가능 시간 (월~일): <code>/활동시간</code> 밑에 한 줄에 한 요일\n<code>/활동시간\n월/12-14,18-20\n화/15-18\n수/불가</code>\n  (처음이면 안 적은 요일은 활동 불가, 이미 냈으면 적은 요일만 바뀜)\n' +
     '• <code>/특전대 내현황</code> — 내 요일별·주간 활동 가능 시간과 결과 건수\n' +
     '• <code>/특전대 결과</code> — 당일 결과 단계별 입력 (발굴건/찾기건 선택)\n' +
     '• <code>/특전대 내결과</code> — 최근 결과 확인·수정·삭제\n' +
@@ -1114,8 +1062,9 @@ export function registerSida(bot: Telegraf<any>) {
 
     bot.hears(/^[\/!](?:특전대|sd)(?:@\w+)?(?:\s+(\S+))?(?:\s+([\s\S]+))?$/i, run((ctx) => dispatch(ctx, ctx.match[1] || '', ctx.match[2] || '')));
     bot.hears(/^\/start(?:@\w+)?\s+sd$/, run((ctx) => dispatch(ctx)));
-    // '활동시간' 만 쳐도 입력 창 버튼 (텔레그램 정책상 앱은 버튼을 눌러야 열림)
+    // '/활동시간' 만 → 양식 안내, '/활동시간' + 요일별 줄 → 저장
     bot.hears(/^[\/!]?활동\s*시간(?:@\w+)?$/, run((ctx) => dispatch(ctx, '제출')));
+    bot.hears(/^[\/!]활동\s*시간(?:@\w+)?\s+([\s\S]+)$/, run((ctx) => handleWeekText(ctx, ctx.match[1])));
 
     bot.action(
         /^sd:(\w+)(?::(.*))?$/,
@@ -1168,7 +1117,6 @@ export function registerSida(bot: Telegraf<any>) {
             const f = s.flow?.chatId === ctx.chat.id && fresh ? s.flow : undefined;
             // 입력 중이라도 결과 양식 전체를 붙여넣으면 자동 정리로 시작 (시간 구간 '09:00~12:00' 은 양식 줄로 인식되지 않음)
             if (await handleFreeForm(ctx, text)) return;
-            if (await handleWeekText(ctx, text)) return;
             if (f?.kind === 'result') return setField(ctx, f, text);
             return next();
         })

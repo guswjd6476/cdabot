@@ -7,7 +7,6 @@ import { runMigrations } from './db';
 import { getErrorMessage } from './utils';
 import { describeAccess, isSysadmin, registerCore } from './core/engine';
 import { registerSida } from './sida/bot';
-import { handleWebApp } from './sida/webapp';
 import { purgeExpiredPii } from './sida/store';
 
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
@@ -81,8 +80,6 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'POST' && route === '/webhook') {
         return bot.webhookCallback(url.pathname)(req, res);
     }
-    // 미니앱 활동 시간 입력 창 (/cdabot/app)
-    if (await handleWebApp(req, res, route, bot.telegram, BOT_TOKEN)) return;
 
     const cronJobs: Record<string, () => Promise<void>> = {
         '/cron-10pm': nightJob,
