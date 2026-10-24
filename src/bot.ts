@@ -332,15 +332,17 @@ const ALLOWED_UPDATES = ['message', 'edited_message', 'callback_query', 'my_chat
 const server = http.createServer(async (req, res) => {
     const url = new URL(req.url || '/', `http://${req.headers.host}`);
 
-    if (req.method === 'POST' && url.pathname === '/webhook') {
-        return bot.webhookCallback('/webhook')(req, res);
+    // alwaysdata 처럼 경로를 붙여 배포해도 동작하도록 (예: /cdabot/webhook, /cdabot/cron-10pm)
+    const route = '/' + (url.pathname.split('/').filter(Boolean).pop() || '');
+    if (req.method === 'POST' && route === '/webhook') {
+        return bot.webhookCallback(url.pathname)(req, res);
     }
 
     const cronJobs: Record<string, () => Promise<void>> = {
         '/cron-10am': morningJob,
         '/cron-10pm': nightJob,
     };
-    const job = cronJobs[url.pathname];
+    const job = cronJobs[route];
     if (job) {
         // CRON_SECRET이 설정되어 있으면 ?key=비밀값 이 맞아야 실행
         const secret = process.env.CRON_SECRET;
