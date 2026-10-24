@@ -7,7 +7,8 @@
         "build": "tsc",
         "start": "node dist/bot.js",
         "dev": "ts-node src/bot.ts",
-        "typecheck": "tsc --noEmit"
+        "typecheck": "tsc --noEmit",
+        "test": "tsc && node --test \"dist/**/*.test.js\""
     },
     "license": "ISC",
     "dependencies": {
@@ -17,6 +18,7 @@
         "telegraf": "^4.16.3"
     },
     "devDependencies": {
+        "@electric-sql/pglite": "^0.5.11",
         "@types/node": "^26.6.5",
         "@types/pg": "^8.23.1",
         "ts-node": "^10.9.2",

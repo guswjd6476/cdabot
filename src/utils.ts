@@ -51,6 +51,26 @@ export function parseMemberString(raw: string): { region: string; team: string; 
     return null;
 }
 
+/* ====================== 📝 보고 양식 ====================== */
+
+// 보고 글에서 '항목: 숫자' 줄만 뽑기 (예: '• 전도: 3명' → { 전도: 3 }) — 항목명이 자유라 역할마다 양식이 달라도 됨
+// '시간: 19:00', '날짜: 10.8' 같은 줄은 숫자 하나로 끝나지 않으므로 제외
+export function parseReportNumbers(rawText: string): Record<string, number> {
+    const result: Record<string, number> = {};
+    for (const line of rawText.normalize('NFKC').split('\n')) {
+        const m = line.match(/^\s*[-•·*]?\s*(?:\d+[.)]\s*)?([^:]+?)\s*:\s*(\d+)\s*[가-힣]{0,2}\s*$/);
+        if (m) result[m[1]] = (result[m[1]] || 0) + parseInt(m[2], 10);
+    }
+    return result;
+}
+
+// 항목 합계 표시 (예: 전도 3 · 섭외 1)
+export function formatReportNumbers(data: Record<string, number>): string {
+    return Object.entries(data)
+        .map(([k, v]) => `${escapeHtml(k)} ${v}`)
+        .join(' · ');
+}
+
 /* ====================== 📅 날짜 ====================== */
 
 // 입력 문자열에서 날짜를 찾아 'YYYY-MM-DD'로 변환 (실패 시 null)

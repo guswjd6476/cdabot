@@ -3,9 +3,21 @@ dotenv.config();
 
 import http from 'http';
 import { Telegraf } from 'telegraf';
-import { initDb, ensureChatRecord, getChat, getAllChats, updateChat } from './db';
 import {
+    initDb,
+    ensureChatRecord,
+    getChat,
+    getAllChats,
+    updateChat,
+    upsertReport,
+    getReports,
+    getChatsByRole,
+    getRoles,
+} from './db';
+import {
+    dayjs,
     escapeHtml,
+    formatReportNumbers,
     formatMeetingWhen,
     formatYmdWithDay,
     getErrorMessage,
@@ -14,9 +26,14 @@ import {
     nowKst,
     parseFlexibleDate,
     parseFlexibleTime,
+    parseReportNumbers,
     replyLong,
     stripDatePart,
+    TZ,
 } from './utils';
+import { describeAccess, isSysadmin, registerCore } from './core/engine';
+import { registerSida } from './sida/bot';
+import { purgeExpiredPii } from './sida/store';
 
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 if (!BOT_TOKEN) {
@@ -24,15 +41,8 @@ if (!BOT_TOKEN) {
     process.exit(1);
 }
 
-// 관리자 Telegram ID 목록 (쉼표 구분)
-const ADMIN_IDS = (process.env.ADMIN_IDS || '')
-    .split(',')
-    .map((id) => id.trim())
-    .filter(Boolean);
-
-function isAdmin(userId?: number | string): boolean {
-    return !!userId && ADMIN_IDS.includes(String(userId));
-}
+// 관리자 = .env ADMIN_IDS (시다봇 시스템 관리자와 동일)
+const isAdmin = isSysadmin;
 
 function chatTitle(ctx: any): string {
     return 'title' in ctx.chat ? ctx.chat.title : ctx.chat.first_name || '대화방';
@@ -46,6 +56,9 @@ const bot = new Telegraf(BOT_TOKEN);
 bot.catch((err: unknown, ctx) => {
     console.error(`[Telegraf 처리 에러] Chat ID: ${ctx.chat?.id}`, err);
 });
+
+// 시다봇 공통 엔진 (입력 세션, /홈, /조직, 준비 중 역할 안내)
+registerCore(bot);
 
 // 방 제목 변경 시 DB 반영
 bot.on('new_chat_title', async (ctx) => {
@@ -69,9 +82,15 @@ bot.hears(/^[\/!](start|help|도움말)(?:@\w+)?$/i, async (ctx) => {
         '📌 <b>[CDA 봇 안내]</b>\n\n' +
             '• <b>내 ID 확인</b>: <code>/내아이디</code>\n' +
             '• <b>현재 방 상태</b>: <code>/상태확인</code>\n' +
-            '• <b>일정 등록</b>: <code>/일정 10.8(목) 오후 7시</code> 또는 <code>/일정 미정</code>\n\n' +
+            '• <b>일정 등록</b>: <code>/일정 10.8(목) 오후 7시</code> 또는 <code>/일정 미정</code>\n' +
+            '• <b>방 역할 확인</b>: <code>/역할</code>\n' +
+            '• <b>보고</b>: 역할이 지정된 방에 <code>항목: 숫자</code> 줄이 있는 글을 올리면 자동 접수 (수정하면 반영)\n\n' +
             '👑 <b>관리자</b>\n' +
-            '• <b>전체 현황</b>: <code>관리자 점검</code>',
+            '• <b>방 역할 지정</b>: <code>/역할 특전대</code> · <code>/역할 해제</code>\n' +
+            '• <b>결과 취합</b>: <code>/결과 특전대</code> 또는 <code>/결과 특전대 10.8</code>\n' +
+            '• <b>전체 현황</b>: <code>관리자 점검</code>\n\n' +
+            '🪖 <b>시다봇 역할</b> (1:1 대화)\n' +
+            '• <code>/홈</code> 역할 선택 · <code>/특전대</code> 특전대 메뉴 · <code>/특전대 도움말</code> 특전대 사용법',
         { parse_mode: 'HTML' }
     );
 });
@@ -138,6 +157,96 @@ bot.hears(/^[\/!]일정(?:@\w+)?(?:(?:\s+|(?=\d))([\s\S]+))?$/i, async (ctx) => 
     }
 });
 
+// 방 역할 확인/지정 (/역할, /역할 특전대, /역할 해제) — 역할 이름은 자유 입력이라 새 역할도 코드 수정 없이 사용
+bot.hears(/^[\/!]역할(?:@\w+)?(?:\s+([\s\S]+))?$/i, async (ctx) => {
+    const input = ctx.match[1]?.trim();
+    try {
+        const record = await ensureChatRecord(ctx.chat.id, chatTitle(ctx));
+        if (!input) {
+            await ctx.reply(
+                `🏷 이 방 역할: <b>${record.role ? escapeHtml(record.role) : '미지정'}</b>\n\n👤 <b>내가 접근 가능한 시다봇 역할</b>\n${await describeAccess(ctx)}`,
+                { parse_mode: 'HTML' }
+            );
+            return;
+        }
+        if (!isAdmin(ctx.from?.id)) {
+            await ctx.reply('⛔ 역할 지정은 관리자만 할 수 있습니다.');
+            return;
+        }
+        if (input === '해제') {
+            await updateChat(ctx.chat.id, { role: null });
+            await ctx.reply('🏷 역할이 해제되었습니다. 이제 이 방의 보고는 취합되지 않습니다.');
+            return;
+        }
+        if (input.length > 50) {
+            await ctx.reply('⚠️ 역할 이름은 50자 이하로 입력해주세요.');
+            return;
+        }
+        await updateChat(ctx.chat.id, { role: input });
+        await ctx.reply(
+            `🏷 이 방 역할이 <b>${escapeHtml(input)}</b>(으)로 지정되었습니다.\n` +
+                '이제 <code>항목: 숫자</code> 형식의 보고를 올리면 자동 취합됩니다.\n예:\n<code>전도: 3명\n섭외: 1명</code>',
+            { parse_mode: 'HTML' }
+        );
+    } catch (err: unknown) {
+        console.error('[/역할 에러]:', err);
+        await ctx.reply(`⚠️ 역할 처리 중 오류 발생: ${getErrorMessage(err)}`);
+    }
+});
+
+// 역할별 결과 취합 (/결과 특전대, /결과 특전대 10.8) — 역할 생략 시 이 방 역할 사용
+bot.hears(/^[\/!]결과(?:@\w+)?(?:\s+([\s\S]+))?$/i, async (ctx) => {
+    try {
+        if (!isAdmin(ctx.from?.id)) {
+            await ctx.reply('⛔ 접근 권한이 없습니다.');
+            return;
+        }
+        const input = ctx.match[1]?.trim() || '';
+        const date = parseFlexibleDate(input) || nowKst().format('YYYY-MM-DD');
+        const role = stripDatePart(input).replace(/\(\s*[월화수목금토일]\s*\)|오늘|내일|모레/g, '').trim() || (await getChat(ctx.chat.id))?.role;
+        if (!role) {
+            const roles = await getRoles();
+            await ctx.reply(
+                '⚠️ 역할을 함께 입력해주세요. 예: <code>/결과 특전대</code>\n' +
+                    `등록된 역할: ${roles.length ? roles.map(escapeHtml).join(', ') : '없음'}`,
+                { parse_mode: 'HTML' }
+            );
+            return;
+        }
+
+        const [reports, rooms] = await Promise.all([getReports(role, date), getChatsByRole(role)]);
+        const total: Record<string, number> = {};
+        const byRoom = new Map<string, { title: string; count: number; data: Record<string, number> }>();
+        for (const r of reports) {
+            const room = byRoom.get(r.chat_id) || { title: r.room_title || r.chat_id, count: 0, data: {} };
+            room.count++;
+            for (const [k, v] of Object.entries(r.data)) {
+                total[k] = (total[k] || 0) + v;
+                room.data[k] = (room.data[k] || 0) + v;
+            }
+            byRoom.set(r.chat_id, room);
+        }
+        const missing = rooms.filter((c) => !byRoom.has(c.chat_id));
+
+        let msg = `📊 <b>[${escapeHtml(role)} 결과] ${formatYmdWithDay(date)}</b>\n━━━━━━━━━━━━━━━━━━\n`;
+        msg += `• 보고: <b>${reports.length}</b>건 (방 ${byRoom.size}/${rooms.length})\n`;
+        msg += Object.keys(total).length
+            ? Object.entries(total).map(([k, v]) => `• ${escapeHtml(k)}: <b>${v}</b>`).join('\n') + '\n'
+            : '• 아직 접수된 보고가 없습니다.\n';
+        if (byRoom.size) {
+            msg += '\n<b>[방별]</b>\n';
+            for (const room of byRoom.values()) {
+                msg += `• ${escapeHtml(room.title)} (${room.count}건): ${formatReportNumbers(room.data)}\n`;
+            }
+        }
+        if (missing.length) msg += `\n⏳ <b>미보고</b>: ${missing.map((c) => escapeHtml(c.room_title)).join(', ')}\n`;
+        await replyLong(ctx, msg);
+    } catch (err: unknown) {
+        console.error('[/결과 에러]:', err);
+        await ctx.reply(`⚠️ 결과 취합 중 오류 발생: ${getErrorMessage(err)}`);
+    }
+});
+
 bot.hears(/^(?:[\/!]?관리자\s+)(점검|현황)$/i, async (ctx) => {
     try {
         if (!isAdmin(ctx.from?.id)) {
@@ -160,27 +269,46 @@ bot.hears(/^(?:[\/!]?관리자\s+)(점검|현황)$/i, async (ctx) => {
     }
 });
 
-// 일반 텍스트 / 수정된 메시지 / 사진 설명글 처리 — 보고서 감지 등은 여기에 추가
-async function handleIncomingText(ctx: any, rawText: string, source: 'text' | 'edited' | 'caption') {
+// 일반 텍스트 / 수정된 메시지 / 사진 설명글 처리 — 역할이 지정된 방이면 보고 감지
+async function handleIncomingText(ctx: any, msg: any, rawText: string, source: 'text' | 'edited' | 'caption') {
     const text = rawText.trim();
     try {
-        await ensureChatRecord(ctx.chat.id, chatTitle(ctx));
+        const record = await ensureChatRecord(ctx.chat.id, chatTitle(ctx));
         if (/^[!/]/.test(text) || /^관리자\s+/.test(text)) return; // 명령어는 위 핸들러에서 처리
-        // TODO: 보고서·양식 감지 로직
+        if (!record.role) return;
+        const data = parseReportNumbers(text);
+        if (Object.keys(data).length === 0) return;
+        const isNew = await upsertReport({
+            chatId: ctx.chat.id,
+            messageId: msg.message_id,
+            role: record.role,
+            reportDate: dayjs.unix(msg.date).tz(TZ).format('YYYY-MM-DD'), // 수정돼도 msg.date는 처음 보낸 시각
+            userId: ctx.from?.id,
+            userName: [ctx.from?.first_name, ctx.from?.last_name].filter(Boolean).join(' '),
+            data,
+            rawText: text,
+        });
+        await ctx.reply(`✅ <b>[${escapeHtml(record.role)}]</b> 보고 ${isNew ? '접수' : '수정 반영'}: ${formatReportNumbers(data)}`, {
+            parse_mode: 'HTML',
+            reply_parameters: { message_id: msg.message_id },
+        });
     } catch (err: unknown) {
         console.error(`[텍스트 메시지 처리 에러] (${source}):`, getErrorMessage(err));
     }
 }
 
-bot.on('text', (ctx) => handleIncomingText(ctx, ctx.message.text, 'text'));
+// 특전대 모듈 (/특전대 명령, 버튼, 1:1 대화 입력 흐름) — 일반 텍스트 처리보다 먼저 등록
+registerSida(bot);
+
+bot.on('text', (ctx) => handleIncomingText(ctx, ctx.message, ctx.message.text, 'text'));
 bot.on('edited_message', async (ctx) => {
     const msg: any = ctx.editedMessage;
     const text: string | undefined = msg?.text ?? msg?.caption;
-    if (text) await handleIncomingText(ctx, text, 'edited');
+    if (text) await handleIncomingText(ctx, msg, text, 'edited');
 });
 bot.on(['photo', 'document', 'video'], async (ctx) => {
     const caption: string | undefined = (ctx.message as any)?.caption;
-    if (caption) await handleIncomingText(ctx, caption, 'caption');
+    if (caption) await handleIncomingText(ctx, ctx.message, caption, 'caption');
 });
 
 /* =====================================================
@@ -191,7 +319,9 @@ async function morningJob() {
 }
 
 async function nightJob() {
-    // TODO: 야간 알림
+    // 보관기간(/특전대 보관기간)이 지난 결과의 이름·연락처 삭제
+    const purged = await purgeExpiredPii();
+    if (purged) console.log(`🗂 [개인정보 보관기간 만료] ${purged}건 이름·연락처 삭제`);
 }
 
 /* =====================================================
