@@ -141,7 +141,8 @@ test('[9] 빈 칸·모자란 칸은 추측하지 않음', () => {
     assert.deepEqual(parseSlashForms('오늘 발 아파요\n발굴건 화이팅'), []); // 양식이 아닌 대화
     assert.equal(parseSlashForms('발/a/b\n찾/c/d').length, 2);
     assert.equal(validateField('age_group', '25살').ok, false);
-    assert.equal(validateField('phone', '1234').ok, false);
+    assert.equal(validateField('phone', '12').ok, false);
+    assert.deepEqual(validateField('phone', '5678'), { ok: true, value: '5678' }); // 뒷자리만
     assert.equal(validateField('gender', '기타', ['남', '여']).ok, false); // 목록 밖 값 임의 분류 안 함
     assert.deepEqual(validateField('region', '대전', ['서울']), { ok: true, value: '대전' }); // 직접 입력 허용
     assert.equal(normalizePhone('02-123-4567'), '021234567');

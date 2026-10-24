@@ -93,6 +93,7 @@ export function parseSlashForms(text: string): ParsedForm[] {
 export function normalizePhone(raw: string): string | null {
     const d = raw.normalize('NFKC').replace(/[\s\-.()]/g, '');
     if (!/^\d+$/.test(d)) return null;
+    if (/^\d{4}$/.test(d)) return d; // 뒷자리 4자리만 받는 운영 방식
     if (/^01[016789]\d{7,8}$/.test(d)) return d.length === 10 ? `${d.slice(0, 3)}-${d.slice(3, 6)}-${d.slice(6)}` : `${d.slice(0, 3)}-${d.slice(3, 7)}-${d.slice(7)}`;
     if (/^0\d{8,10}$/.test(d)) return d; // 유선 등은 숫자 그대로
     return null;
@@ -105,7 +106,7 @@ export function validateField(key: FieldKey, raw: string, options: string[] = []
     if (v.length > 100) return { ok: false, reason: '100자 이하로 입력해주세요.' };
     if (key === 'phone') {
         const p = normalizePhone(v);
-        return p ? { ok: true, value: p } : { ok: false, reason: `연락처 형식을 확인해주세요: "${v}" (예: 010-1234-5678)` };
+        return p ? { ok: true, value: p } : { ok: false, reason: `연락처 형식을 확인해주세요: "${v}" (예: 뒷자리 5678 또는 010-1234-5678)` };
     }
     if (key === 'age_group') {
         const hit = AGE_GROUPS.find((a) => squash(a) === squash(v));

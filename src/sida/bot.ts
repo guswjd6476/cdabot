@@ -162,6 +162,7 @@ const ACTIONS: Record<string, Action> = {
     조직: { need: null, run: (ctx, a) => askOrg(ctx, MK, a) },
     방등록: { need: 'manager', place: 'group', run: registerGroup },
     방해제: { need: 'manager', place: 'group', run: unregisterGroup },
+    현황판: { need: 'manager', place: 'group', run: setBoard },
 };
 
 async function dispatch(ctx: Ctx, sub = '', args = '') {
@@ -309,7 +310,7 @@ interface ResultFlow {
 }
 
 const HINTS: Partial<Record<R.FieldKey, string>> = {
-    phone: '\n예: <code>010-1234-5678</code>',
+    phone: '\n예: 뒷자리 <code>5678</code> (전체 번호도 됨)',
     birth_date: '\n예: <code>990315</code>',
     meet_at: '\n예: <code>10.28 19시</code>',
     meet_place: '\n예: <code>강남역 카페</code>',
@@ -418,6 +419,7 @@ async function saveResult(ctx: Ctx, a: A, s: Record<string, any>, f: ResultFlow)
         await audit(f.orgId, a.userId, 'result.create', id, { kind: f.form });
     }
     delete s.flow;
+    await touchBoard(ctx, f.orgId);
     await show(ctx, `✅ ${R.FORMS[f.form].label} 결과 #${id} ${f.editId ? '수정' : '저장'} 완료`, [[btn('➕ 결과 추가 입력', 'sd:a:결과'), btn('📄 내 결과', 'sd:a:내결과')]]);
 }
 
@@ -450,6 +452,7 @@ async function resultCb(ctx: Ctx, a: A, s: Record<string, any>, arg: string) {
             return show(ctx, `🗑 결과 #${row.id} 을(를) 삭제할까요?`, [[btn('삭제', `sd:rs:delok:${row.id}`), btn('취소', `sd:rs:view:${row.id}`)]]);
         if (cmd === 'delok') {
             await S.deleteResult(a.org.id, row.id);
+            await touchBoard(ctx, a.org.id);
             await audit(a.org.id, a.userId, 'result.delete', row.id);
             return show(ctx, `🗑 결과 #${row.id} 삭제 완료`, [[btn('📄 내 결과', 'sd:a:내결과')]]);
         }
@@ -505,13 +508,14 @@ async function handleWeekText(ctx: Ctx, text: string) {
     const [existing, settings] = await Promise.all([S.getSubmissions(p.id).then((m) => m.get(a.userId)), getSettings(a.org.id, MK)]);
     const days: S.WeekDays = Object.fromEntries(T.WEEKDAYS.map((w) => [w, parsed.days[w] ?? existing?.days[w] ?? { unavailable: true, slots: [] }]));
     await S.saveSubmission(p.id, a.userId, days);
+    await touchBoard(ctx, a.org.id);
     await audit(a.org.id, a.userId, existing ? 'avail.update' : 'avail.submit', p.id, days);
     const untouched = T.WEEKDAYS.filter((w) => !parsed.days[w]);
     const note = untouched.length ? `\n\nℹ️ 안 적은 요일(${untouched.map((w) => T.DAY_NAMES[w]).join(', ')}): ${existing ? '기존 제출 그대로' : '활동 불가로 저장'}` : '';
     await show(ctx, `✅ <b>활동 가능 시간 ${existing ? '수정' : '제출'} 완료</b> (${weekLabel(p.week_start)})\n\n${renderPersonWeek(p.week_start, days, Number(settings.min_minutes) || T.DEFAULT_MIN_MINUTES)}${note}`);
 }
 
-// 단체방에 '발/…' 또는 '찾/…' 양식 → 자동 정리 후 빠지거나 틀린 칸만 질문
+// 단체방에 '발/…' 또는 '찾/…' 양식. 한 건이면 자동 정리 후 빠지거나 틀린 칸만 질문, 여러 건이면 바로 저장
 async function handleFreeForm(ctx: Ctx, text: string): Promise<boolean> {
     const forms = R.parseSlashForms(text);
     if (!forms.length) return false;
@@ -524,27 +528,73 @@ async function handleFreeForm(ctx: Ctx, text: string): Promise<boolean> {
         await ctx.reply('🪖 결과를 제출하려면 먼저 특전대 대원 등록이 필요합니다. /특전대 를 눌러 가입 요청해주세요.');
         return true;
     }
-    if (forms.length > 1) {
-        await ctx.reply(`⚠️ 한 메시지에 ${forms.length}건이 있습니다. 결과는 한 메시지에 한 건씩 올려주세요.`);
-        return true;
-    }
-    const dedupKey = `m:${ctx.chat.id}:${ctx.message.message_id}`;
-    if (await S.resultExists(dedupKey)) {
-        await ctx.reply('ℹ️ 이 메시지는 이미 저장되었습니다.');
-        return true;
-    }
-    const [form] = forms;
     const opts = await S.listOptions(a.org.id);
-    const values: R.ResultValues = {};
-    const notes = [...form.notes];
-    for (const k of R.FORMS[form.kind].fields) {
-        const raw = form.values[k];
-        if (!raw) continue;
-        const r = R.validateField(k, raw, k === 'age_group' ? [] : opts[k] || []);
-        if (r.ok) values[k] = r.value;
-        else notes.push(`${R.fieldLabel(k)}: ${r.reason}`);
+    // 칸별 검증. 여러 건을 한 번에 올리면 다시 묻지 않으므로 형식이 안 맞는 값도 입력 그대로 두고 확인 필요로 표시
+    const clean = (form: R.ParsedForm, keepRaw: boolean) => {
+        const values: R.ResultValues = {};
+        const notes = [...form.notes];
+        for (const k of R.FORMS[form.kind].fields) {
+            const raw = form.values[k];
+            if (!raw) continue;
+            const r = R.validateField(k, raw, k === 'age_group' ? [] : opts[k] || []);
+            if (r.ok) values[k] = r.value;
+            else {
+                notes.push(keepRaw ? `${R.fieldLabel(k)} 형식 확인` : `${R.fieldLabel(k)}: ${r.reason}`);
+                if (keepRaw) values[k] = raw;
+            }
+        }
+        return { kind: form.kind, values, notes };
+    };
+    const who = (kind: R.FormKind, v: R.ResultValues) => {
+        const all = (kind === 'dig' ? v.phone : v.birth_date)?.replace(/\D/g, '');
+        const digits = kind === 'dig' ? all?.slice(-4) : all; // 연락처는 뒷자리 4자리로 비교
+        return v.name && digits ? { name: v.name, digits } : null;
+    };
+    const base = `m:${ctx.chat.id}:${ctx.message.message_id}`;
+
+    if (forms.length === 1) {
+        if (await S.resultExists(base)) {
+            await ctx.reply('ℹ️ 이 메시지는 이미 저장되었습니다.');
+            return true;
+        }
+        const one = clean(forms[0], false);
+        const p = who(one.kind, forms[0].values); // 형식이 틀린 값도 입력 그대로 비교
+        if (p && (await S.isDuplicateResult(a.org.id, one.kind, p.name, p.digits))) {
+            await ctx.reply(`⏭ 이미 등록된 ${R.FORMS[one.kind].label}입니다 (${one.kind === 'dig' ? '이름·연락처 뒷자리' : '이름·생년월일'} 같음). 저장하지 않았습니다.`);
+            return true;
+        }
+        await startResult(ctx, a as A, { ...one, dedupKey: base });
+        return true;
     }
-    await startResult(ctx, a as A, { kind: form.kind, values, notes, dedupKey });
+
+    // 여러 건: 줄마다 바로 저장, 이미 있는 사람(또는 같은 메시지 안 중복)은 빼고
+    const saved: string[] = [];
+    const skipped: string[] = [];
+    const seen = new Set<string>();
+    for (const [i, form] of forms.entries()) {
+        const one = clean(form, true);
+        const p = who(one.kind, form.values);
+        const label = `${i + 1}번째 줄 ${e(R.maskName(one.values.name) || '(이름 없음)')}`;
+        const key = p && `${one.kind}|${p.name}|${p.digits}`;
+        if ((key && seen.has(key)) || (p && (await S.isDuplicateResult(a.org.id, one.kind, p.name, p.digits)))) {
+            skipped.push(label);
+            continue;
+        }
+        if (key) seen.add(key);
+        const id = await S.insertResult({ orgId: a.org.id, userId: a.userId, kind: one.kind, date: today(), values: one.values, dedupKey: `${base}:${i}` });
+        if (!id) continue; // 같은 메시지가 다시 들어온 경우
+        await audit(a.org.id, a.userId, 'result.create', id, { kind: one.kind, bulk: true });
+        const empty = R.missingCount({ kind: one.kind, ...one.values });
+        const extra = [...one.notes, ...(empty ? [`빈 칸 ${empty}개`] : [])];
+        saved.push(`#${id} ${R.FORMS[one.kind].label} ${label}${extra.length ? ` — ⚠️ ${e(extra.join(', '))}` : ''}`);
+    }
+    if (saved.length) await touchBoard(ctx, a.org.id);
+    await ctx.reply(
+        `✅ <b>결과 ${saved.length}건 저장</b>${saved.length ? `\n${saved.join('\n')}` : ''}` +
+            (skipped.length ? `\n\n⏭ <b>중복 제외 ${skipped.length}건</b> (이미 등록된 사람)\n${skipped.join('\n')}` : '') +
+            (saved.some((x) => x.includes('⚠️')) ? '\n\n빈 칸·형식 확인은 <code>/특전대 내결과</code> 에서 고칠 수 있습니다.' : ''),
+        { parse_mode: 'HTML' }
+    );
     return true;
 }
 
@@ -645,9 +695,16 @@ async function timetableCsv(ctx: Ctx, a: A, period: S.Period) {
 
 async function todayReport(ctx: Ctx, a: A, args: string) {
     const date = parseFlexibleDate(args) || today();
+    const { html, results } = await todayHtml(a.org.id, date);
+    const buttons: Buttons = hasPerm(a, 'pii') && results.length ? [[btn('📇 상세 결과 (개인정보)', `sd:td:${date}`)]] : [];
+    await show(ctx, html, buttons);
+}
+
+// 일일 현황 (이름·연락처 같은 개인정보 없음 → 단체방 현황판에도 사용)
+async function todayHtml(orgId: number, date: string) {
     const w = weekdayOf(date);
-    const period = await S.getPeriodByWeek(a.org.id, weekStartOf(date));
-    const [{ members, subs, min }, results] = await Promise.all([loadWeek(a.org.id, period), S.listResults(a.org.id, { from: date, to: date })]);
+    const period = await S.getPeriodByWeek(orgId, weekStartOf(date));
+    const [{ members, subs, min }, results] = await Promise.all([loadWeek(orgId, period), S.listResults(orgId, { from: date, to: date })]);
     const people = weekTable(members, subs, min, w).people;
     const count = (st: T.DayStatus) => people.filter((p) => p.status === st).length;
     const byUser = new Map<number, number>();
@@ -669,8 +726,44 @@ async function todayReport(ctx: Ctx, a: A, args: string) {
         })
         .join('\n');
     html += `\n\n<b>3. 당일 결과</b> — 총 ${results.length}건\n${resultStats(results)}`;
-    const buttons: Buttons = hasPerm(a, 'pii') && results.length ? [[btn('📇 상세 결과 (개인정보)', `sd:td:${date}`)]] : [];
-    await show(ctx, html, buttons);
+    return { html, results };
+}
+
+/* ====================== 단체방 현황판 (주제방의 한 메시지를 계속 갱신) ====================== */
+
+type Board = { chatId: number; threadId?: number; date?: string; messageId?: number };
+
+// 결과·활동 시간이 바뀔 때마다 호출. 날짜가 바뀌면 그날 현황판을 새 메시지로 올림
+// shortcut: 동시에 두 건이 저장되면 날짜 바뀐 직후 현황판 메시지가 2개 생길 수 있음, 문제 되면 잠금 추가
+async function refreshBoard(telegram: Telegraf['telegram'], orgId: number) {
+    const b: Board | null = (await getSettings(orgId, MK)).board;
+    if (!b) return;
+    const date = today();
+    let html = `📌 <b>실시간 현황판</b> — 제출될 때마다 자동 갱신\n\n${(await todayHtml(orgId, date)).html}`;
+    if (html.length > 4000) html = html.slice(0, 3900) + '\n…(길어서 생략 — 전체는 관리자 /특전대 오늘현황)';
+    if (b.messageId && b.date === date) {
+        try {
+            await telegram.editMessageText(b.chatId, b.messageId, undefined, html, { parse_mode: 'HTML' });
+            return;
+        } catch (err) {
+            if (/not modified/.test(getErrorMessage(err))) return; // 지워졌으면 아래에서 새로 올림
+        }
+    }
+    const m = await telegram.sendMessage(b.chatId, html, { parse_mode: 'HTML', message_thread_id: b.threadId });
+    await setSetting(orgId, MK, 'board', { ...b, date, messageId: m.message_id });
+}
+const touchBoard = (ctx: Ctx, orgId: number) => refreshBoard(ctx.telegram, orgId).catch((err) => console.error('[현황판 갱신 실패]:', getErrorMessage(err)));
+
+// 현황판을 둘 주제(토픽)에서 '/특전대 현황판' — 해제는 '/특전대 현황판 해제'
+async function setBoard(ctx: Ctx, a: A, args: string) {
+    if (/해제|끄기/.test(args)) {
+        await setSetting(a.org.id, MK, 'board', null);
+        return void (await ctx.reply('📌 현황판을 껐습니다.'));
+    }
+    const threadId = ctx.msg?.is_topic_message ? ctx.msg.message_thread_id : undefined;
+    await setSetting(a.org.id, MK, 'board', { chatId: ctx.chat.id, threadId });
+    await audit(a.org.id, a.userId, 'board.set', ctx.chat.id, { threadId });
+    await refreshBoard(ctx.telegram, a.org.id);
 }
 
 const STAT_FIELDS: Record<R.FormKind, R.FieldKey[]> = {
@@ -1065,7 +1158,7 @@ const HELP_MEMBER =
     '• <code>/특전대 내현황</code> — 내 요일별·주간 활동 가능 시간과 결과 건수\n' +
     '• <code>/특전대 결과</code> — 당일 결과 단계별 입력 (발굴건/찾기건 선택)\n' +
     '• <code>/특전대 내결과</code> — 최근 결과 확인·수정·삭제\n' +
-    `• 결과 한 번에 보내기 (한 메시지에 한 건, 단체방에):\n${FORM_GUIDE}\n예: <code>발/홍길동/010-1234-5678/20대중/남/서울/1팀/김철수/전단지/+10.28 19시,강남역</code>\n` +
+    `• 결과 한 번에 보내기 (단체방에, 여러 건은 한 줄에 한 건 — 이미 등록된 사람은 자동 제외):\n${FORM_GUIDE}\n예: <code>발/홍길동/010-1234-5678/20대중/남/서울/1팀/김철수/전단지/+10.28 19시,강남역</code>\n` +
     '• 하루 기준 시간 이상이면 충족, 겹치는 시간은 한 번만 계산. 자정을 넘는 구간은 24:00까지만 입력';
 const HELP_MANAGER =
     '\n\n👑 <b>팀 관리자</b> (봇과 1:1 대화)\n' +
@@ -1073,6 +1166,7 @@ const HELP_MANAGER =
     '• <code>/특전대 결과검색 기간:10.1~10.24 인도지역:서울</code>\n' +
     '• <code>/특전대 미제출</code> · <code>부족시간</code> · <code>마감</code> · <code>재개방 [날짜]</code> · <code>주차시작 [날짜]</code> · <code>수정허용 ID</code>\n' +
     '• 단체방에서: <code>/특전대 방등록</code> (그 방 사람은 가입 요청 없이 자동 대원) · <code>방해제</code>\n' +
+    '• 현황판 둘 주제(토픽)에서: <code>/특전대 현황판</code> — 결과·활동 시간이 올라올 때마다 그 메시지를 자동 갱신 (끄기: <code>현황판 해제</code>)\n' +
     '• <code>/특전대 대원</code> — 이름 눌러 대원/관리자/제외 (대원만 집계) · <code>승인</code> · <code>등록 ID 이름</code> · <code>활성/비활성 ID</code> · <code>이름 ID 새이름</code> · <code>옵션</code> · <code>결과수정 번호</code>';
 const HELP_ADMIN = '\n\n🛠 <b>시스템 관리자</b>\n• <code>/특전대 권한 ID member,manager,pii</code> · <code>기준 6</code> · <code>보관기간 365</code> · <code>/조직</code>';
 

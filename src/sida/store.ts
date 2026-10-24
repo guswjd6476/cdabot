@@ -153,6 +153,17 @@ export async function insertResult(r: {
     return res.rows[0]?.id ?? null;
 }
 
+// 같은 사람 결과가 이미 있는지 (발굴건 = 이름+연락처 뒷자리 4자리, 찾기건 = 이름+생년월일 숫자)
+export async function isDuplicateResult(orgId: number, kind: FormKind, name: string, digits: string): Promise<boolean> {
+    const digitsOf = `regexp_replace(COALESCE(${kind === 'dig' ? 'phone' : 'birth_date'}, ''), '\\D', '', 'g')`;
+    const res = await query(
+        `SELECT 1 FROM cdabot_results WHERE org_id = $1 AND kind = $2 AND deleted_at IS NULL AND name = $3
+           AND ${kind === 'dig' ? `right(${digitsOf}, 4)` : digitsOf} = $4 LIMIT 1;`,
+        [orgId, kind, name, digits]
+    );
+    return res.rows.length > 0;
+}
+
 export async function resultExists(dedupKey: string): Promise<boolean> {
     return (await query(`SELECT 1 FROM cdabot_results WHERE dedup_key = $1;`, [dedupKey])).rows.length > 0;
 }

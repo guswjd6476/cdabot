@@ -9,7 +9,7 @@ import { PGlite } from '@electric-sql/pglite';
 import { Telegraf, Telegram } from 'telegraf';
 import { query, runMigrations, setQueryable } from '../db';
 import { registerCore } from '../core/engine';
-import { createOrg, getMember, loadSession, saveSession, upsertMembership, upsertUser } from '../core/store';
+import { createOrg, getMember, getSettings, loadSession, saveSession, setSetting, upsertMembership, upsertUser } from '../core/store';
 import { nowKst } from '../utils';
 import { registerSida } from './bot';
 import * as S from './store';
@@ -195,12 +195,34 @@ test('[8][9][11] 발굴건·찾기건 한 줄 양식 — 자동 정리, 빠진 �
     assert.match(await send(101, form, 5000), /이미 저장/); // 같은 메시지 재처리
     assert.match(await press(101, 'sd:rs:ok'), /진행 중인 입력이 없습니다/); // 확인 버튼 두 번
     assert.equal((await S.listResults(1)).length, 1);
-    assert.match(await send(101, '발/a/b\n발/c/d'), /한 메시지에 한 건씩/);
+
+    // 여러 건 한 번에: 줄마다 바로 저장, 이미 등록된 사람·같은 메시지 안 중복은 제외
+    const bulk = await send(
+        101,
+        '발/테스트/1234/20대초/여/강북/1/강현정/노방\n발/테스트2/2234/20대초/여/강북/1/강현정/노방\n발/테스트3/4234/20대초/여/강북/1/강현정/노방\n' +
+            '발/홍길동/010 1234 5678/20대중/남/서울/1팀/김철수/전단지\n발/테스트2/2234/20대초/여/강북/1/강현정/노방',
+        5100
+    );
+    assert.match(bulk, /결과 3건 저장/);
+    assert.match(bulk, /1번째 줄 테\*트 — ⚠️ 빈 칸 2개/); // 연락처 뒷자리 4자리 OK, 2차 만남 빈 칸
+    assert.match(bulk, /중복 제외 2건[\s\S]*4번째 줄 홍\*동\n5번째 줄 테\*\*2/);
+    assert.ok(!bulk.includes('1234'), '단체방 답장에 연락처 안 보임');
+    const added: S.ResultRow[] = (await S.listResults(1)).filter((r) => r.name?.startsWith('테스트'));
+    assert.deepEqual(added.map((r) => [r.name, r.phone, r.age_group, r.tool]).sort(), [
+        ['테스트', '1234', '20대 초', '노방'],
+        ['테스트2', '2234', '20대 초', '노방'],
+        ['테스트3', '4234', '20대 초', '노방'],
+    ]);
+    assert.match(await send(101, '발/테스트/1234/20대초'), /이미 등록된 발굴건/); // 한 건짜리도 중복이면 저장 안 함
+    assert.match(await send(101, '발/테스트3/010-5555-4234\n발/테스트3/9999'), /결과 1건 저장[\s\S]*2번째 줄 테\*\*3[\s\S]*중복 제외 1건[\s\S]*1번째 줄/); // 전체 번호여도 뒷자리로 비교
+    for (const r of (await S.listResults(1)).filter((x) => x.phone === '9999')) added.push(r);
+    assert.match(await send(101, '발/테스트/1234\n발/테스트3/4234'), /결과 0건 저장[\s\S]*중복 제외 2건/); // 다시 올려도 안 늘어남
+    for (const r of added) await S.deleteResult(1, r.id); // 아래 건수 검증에 영향 없게
 
     const r2 = await send(101, '발/김영희//25살/여/부산');
     assert.match(r2, /생년 구분은 .* 중에서 선택/); // 허용 밖 값은 확인
     assert.match(r2, /연락처, 생년 구분, 인도팀, 인도자, 도구, 2차 만남 일시, 2차 만남 장소/); // 빠진 칸만 (추측 없음)
-    assert.match(await send(101, '1234'), /연락처 형식을 확인/);
+    assert.match(await send(101, '12'), /연락처 형식을 확인/);
     assert.match(await send(101, '010-2222-3333'), /생년 구분/);
     assert.match(await press(101, 'sd:rs:pick:1'), /인도팀/);
     await press(101, 'sd:rs:skip');
@@ -380,6 +402,43 @@ test('인원·역할 관리 — 목록에서 눌러 대원/관리자/제외, 대
 
     await send(ADMIN, '/특전대 방해제', ++messageId, ROOM);
     await press(ADMIN, `sd:mr:${m962.id}-out`); // 다음 테스트 인원 수에 영향 없게
+});
+
+test('주제방 현황판 — 한 메시지를 계속 갱신, 날짜 바뀌면 새로', async () => {
+    const ROOM = -100555;
+    const topic = async (from: number, text: string, thread: number) => {
+        calls = [];
+        await bot.handleUpdate({
+            update_id: ++updateId,
+            message: { message_id: ++messageId, message_thread_id: thread, is_topic_message: true, date: Math.floor(Date.now() / 1000), chat: { id: ROOM, type: 'supergroup', is_forum: true }, from: user(from), text },
+        } as any);
+        return calls;
+    };
+    await send(ADMIN, '/특전대 방등록', ++messageId, ROOM);
+    assert.match((await topic(101, '/특전대 현황판', 7)).map((c) => c.payload.text).join(), /권한이 없습니다/); // 대원은 불가
+    const made = (await topic(ADMIN, '/특전대 현황판', 7)).find((c) => c.method === 'sendMessage')!;
+    assert.equal(made.payload.message_thread_id, 7); // 현황판 주제에 올라감
+    assert.match(made.payload.text, /실시간 현황판[\s\S]*당일 결과<\/b> — 총/);
+    assert.ok(!/010-|1234/.test(made.payload.text), '현황판에 연락처 없음');
+    const board = (await getSettings(1, S.MODULE_KEY)).board;
+    assert.deepEqual([board.chatId, board.threadId, board.date], [ROOM, 7, nowKst().format('YYYY-MM-DD')]);
+
+    // 다른 주제(결과 쓰는 곳)에 올리면 답장은 그 주제로, 현황판은 같은 메시지 수정
+    const posted = await topic(101, '발/주제/5678/30대\n발/주제2/6789/30대', 9);
+    assert.equal(posted.find((c) => c.method === 'sendMessage')!.payload.message_thread_id, 9);
+    const edit = posted.find((c) => c.method === 'editMessageText')!;
+    assert.deepEqual([edit.payload.chat_id, edit.payload.message_id], [ROOM, board.messageId]);
+    assert.match(edit.payload.text, /U101: .* \/ 결과 \d+건/);
+
+    await setSetting(1, S.MODULE_KEY, 'board', { ...board, date: '2000-01-01' }); // 날짜가 바뀐 것처럼
+    const next = await topic(101, '/활동시간 일/10-12', 9);
+    assert.ok(!next.some((c) => c.method === 'editMessageText'));
+    assert.equal(next.filter((c) => c.method === 'sendMessage' && c.payload.message_thread_id === 7).length, 1); // 새 현황판
+
+    await topic(ADMIN, '/특전대 현황판 해제', 7);
+    assert.ok(!(await topic(101, '발/주제3/1111/30대\n발/주제4/2222/30대', 9)).some((c) => c.method === 'editMessageText' || c.payload?.message_thread_id === 7));
+    for (const r of (await S.listResults(1)).filter((x) => x.name?.startsWith('주제'))) await S.deleteResult(1, r.id);
+    await send(ADMIN, '/특전대 방해제', ++messageId, ROOM);
 });
 
 test('[14] 조직별 데이터 분리', async () => {
