@@ -467,34 +467,40 @@ interface ResultFlow {
     date: string;
     values: R.ResultValues;
     queue: R.FieldKey[];
+    form?: R.FormKind; // 발굴건 / 찾기건 (단계별 입력은 먼저 고름)
     dedupKey: string;
     editId?: number;
     opts?: string[];
 }
 
 const HINTS: Partial<Record<R.FieldKey, string>> = {
-    bal: '\n(현재 운영 양식의 값을 그대로 입력)',
     phone: '\n예: <code>010-1234-5678</code>',
-    age_group: '\n(정확한 생년월일은 받지 않습니다)',
+    birth_date: '\n예: <code>990315</code>',
+    meet_at: '\n예: <code>10.28 19시</code>',
+    meet_place: '\n예: <code>강남역 카페</code>',
+    target_month: '\n예: <code>11월</code>',
 };
+const formFields = (f: { form?: R.FormKind }) => (f.form ? R.FORMS[f.form].fields : []);
+const FORM_GUIDE = `<code>${R.FORMS.dig.template}</code>\n<code>${R.FORMS.find.template}</code>`;
 
-async function startResult(ctx: Ctx, a: A, init?: { values: R.ResultValues; dedupKey: string; notes: string[] }) {
+async function startResult(ctx: Ctx, a: A, init?: R.ParsedForm & { dedupKey: string }) {
     const values = init?.values ?? {};
     const f: ResultFlow = {
         kind: 'result',
         chatId: ctx.chat.id,
         orgId: a.org.id,
         date: today(),
+        form: init?.kind,
         values,
-        queue: R.FIELD_KEYS.filter((k) => values[k] === undefined),
+        queue: init ? R.FORMS[init.kind].fields.filter((k) => values[k] === undefined) : [],
         dedupKey: init?.dedupKey ?? `f:${a.userId}:${Date.now()}:${Math.random().toString(36).slice(2, 8)}`,
     };
     (await session(ctx)).flow = f;
     if (init) {
-        const got = R.FIELD_KEYS.filter((k) => values[k]).map((k) => `• ${R.fieldLabel(k)}: ${e(values[k])}`);
+        const got = formFields(f).filter((k) => values[k]).map((k) => `• ${R.fieldLabel(k)}: ${e(values[k])}`);
         await ctx.reply(
-            `🧾 <b>자동 정리 결과</b>\n${got.join('\n') || '(인식된 값 없음)'}` +
-                (init.notes.length ? `\n\n${init.notes.map(e).join('\n')}` : '') +
+            `🧾 <b>자동 정리 결과 — ${R.FORMS[init.kind].label}</b>\n${got.join('\n') || '(인식된 값 없음)'}` +
+                (init.notes.length ? `\n\n${init.notes.map((n) => `⚠️ ${e(n)}`).join('\n')}` : '') +
                 (f.queue.length ? `\n\n빠졌거나 확인이 필요한 항목만 이어서 여쭤볼게요: ${f.queue.map(R.fieldLabel).join(', ')}` : ''),
             { parse_mode: 'HTML' }
         );
@@ -503,14 +509,20 @@ async function startResult(ctx: Ctx, a: A, init?: { values: R.ResultValues; dedu
 }
 
 async function askNext(ctx: Ctx, f: ResultFlow) {
+    if (!f.form)
+        return show(ctx, `✍️ <b>오늘 결과 제출</b>\n어떤 결과인가요?\n\n양식을 한 줄로 올려도 됩니다:\n${FORM_GUIDE}`, [
+            [btn('🔍 발굴건', 'sd:rs:form:dig'), btn('🧭 찾기건', 'sd:rs:form:find')],
+            [btn('✖ 취소', 'sd:rs:cx')],
+        ]);
     const k = f.queue[0];
     if (!k) return resultReview(ctx, f);
     const opts = k === 'age_group' ? R.AGE_GROUPS : R.OPTION_FIELDS.includes(k) ? (await S.listOptions(f.orgId))[k] || [] : [];
     f.opts = opts;
     const free = k !== 'age_group' && !(k === 'gender' && opts.length);
+    const fields = formFields(f);
     await show(
         ctx,
-        `✍️ <b>${f.editId ? `결과 #${f.editId} 수정` : '오늘 결과 제출'}</b> [${R.FIELD_KEYS.indexOf(k) + 1}/${R.FIELD_KEYS.length}]\n` +
+        `✍️ <b>${f.editId ? `결과 #${f.editId} 수정` : '오늘 결과 제출'} — ${R.FORMS[f.form].label}</b> [${fields.indexOf(k) + 1}/${fields.length}]\n` +
             `<b>${R.fieldLabel(k)}</b>을(를) ${opts.length ? (free ? '선택하거나 직접 입력해주세요.' : '선택해주세요.') : '입력해주세요.'}${HINTS[k] || ''}`,
         [
             ...chunk(
@@ -524,7 +536,7 @@ async function askNext(ctx: Ctx, f: ResultFlow) {
 
 async function setField(ctx: Ctx, f: ResultFlow, raw: string) {
     const k = f.queue[0];
-    if (!k) return resultReview(ctx, f);
+    if (!k) return askNext(ctx, f);
     const r = R.validateField(k, raw, f.opts || []);
     if (!r.ok) {
         await ctx.reply(`⚠️ ${r.reason}`);
@@ -535,42 +547,43 @@ async function setField(ctx: Ctx, f: ResultFlow, raw: string) {
     await askNext(ctx, f);
 }
 
-const resultDetail = (v: R.ResultValues, hidePii = false) =>
-    R.FIELD_KEYS.map((k, i) => {
-        const val = !v[k] ? '<i>(미입력)</i>' : hidePii && k === 'name' ? e(R.maskName(v[k])) : hidePii && k === 'phone' ? '🔒' : e(v[k]);
-        return `${i + 1}. ${R.fieldLabel(k)}: ${val}`;
-    }).join('\n');
+// hidePii: 단체방에서는 이름 가림, 연락처·생년월일 숨김
+const piiCell = (k: R.FieldKey, v: string, hidePii: boolean) => (!hidePii || !R.PII_FIELDS.includes(k) ? e(v) : k === 'name' ? e(R.maskName(v)) : '🔒');
+const resultDetail = (v: R.ResultValues, form: R.FormKind, hidePii = false) =>
+    R.FORMS[form].fields.map((k, i) => `${i + 1}. ${R.fieldLabel(k)}: ${v[k] ? piiCell(k, v[k]!, hidePii) : '<i>(미입력)</i>'}`).join('\n');
 
 async function resultReview(ctx: Ctx, f: ResultFlow) {
-    await show(ctx, `🧾 <b>${f.editId ? `결과 #${f.editId} 수정 확인` : '결과 확인'}</b> (활동일 ${f.date})\n\n${resultDetail(f.values)}\n\n맞으면 <b>저장</b>을 눌러주세요.`, [
-        [btn('✅ 저장', 'sd:rs:ok'), btn('✏️ 항목 수정', 'sd:rs:ed')],
-        [btn('✖ 취소', 'sd:rs:cx')],
-    ]);
+    await show(
+        ctx,
+        `🧾 <b>${f.editId ? `결과 #${f.editId} 수정 확인` : '결과 확인'} — ${R.FORMS[f.form!].label}</b> (활동일 ${f.date})\n\n${resultDetail(f.values, f.form!)}\n\n맞으면 <b>저장</b>을 눌러주세요.`,
+        [[btn('✅ 저장', 'sd:rs:ok'), btn('✏️ 항목 수정', 'sd:rs:ed')], [btn('✖ 취소', 'sd:rs:cx')]]
+    );
 }
 
 // 본인 결과이거나, 팀 관리자 + 개인정보 조회 권한이 있을 때만 다른 사람 결과 열람·수정
 const canTouchResult = (a: A, row: S.ResultRow) => row.user_id === a.userId || (hasPerm(a, 'manager') && hasPerm(a, 'pii'));
 
 async function saveResult(ctx: Ctx, a: A, s: Record<string, any>, f: ResultFlow) {
+    if (!f.form) return askNext(ctx, f);
     let id: number | null;
     if (f.editId) {
         const row = await S.getResult(f.orgId, f.editId);
         if (!row || !canTouchResult(a, row)) return show(ctx, '⛔ 수정할 수 없는 결과입니다.');
         await S.updateResult(f.orgId, f.editId, f.values);
         // 감사 로그에는 개인정보 값 대신 바뀐 항목 이름만 남김
-        await audit(f.orgId, a.userId, 'result.update', f.editId, { changed: R.FIELD_KEYS.filter((k) => (row[k] ?? null) !== (f.values[k] ?? null)) });
+        await audit(f.orgId, a.userId, 'result.update', f.editId, { changed: formFields(f).filter((k) => (row[k] ?? null) !== (f.values[k] ?? null)) });
         id = f.editId;
     } else {
         if (!hasPerm(a, 'member')) return show(ctx, '⛔ 권한이 없습니다.');
-        id = await S.insertResult({ orgId: f.orgId, userId: a.userId, date: f.date, values: f.values, dedupKey: f.dedupKey });
+        id = await S.insertResult({ orgId: f.orgId, userId: a.userId, kind: f.form, date: f.date, values: f.values, dedupKey: f.dedupKey });
         if (!id) {
             delete s.flow;
             return show(ctx, 'ℹ️ 이미 저장된 결과입니다. (중복 저장 방지)');
         }
-        await audit(f.orgId, a.userId, 'result.create', id);
+        await audit(f.orgId, a.userId, 'result.create', id, { kind: f.form });
     }
     delete s.flow;
-    await show(ctx, `✅ 결과 #${id} ${f.editId ? '수정' : '저장'} 완료`, [[btn('➕ 결과 추가 입력', 'sd:a:결과'), btn('📄 내 결과', 'sd:a:내결과')]]);
+    await show(ctx, `✅ ${R.FORMS[f.form].label} 결과 #${id} ${f.editId ? '수정' : '저장'} 완료`, [[btn('➕ 결과 추가 입력', 'sd:a:결과'), btn('📄 내 결과', 'sd:a:내결과')]]);
 }
 
 async function editResult(ctx: Ctx, a: A, id: number) {
@@ -582,6 +595,7 @@ async function editResult(ctx: Ctx, a: A, id: number) {
         chatId: ctx.chat.id,
         orgId: a.org.id,
         date: row.activity_date,
+        form: row.kind,
         values: Object.fromEntries(R.FIELD_KEYS.map((k) => [k, row[k]])),
         queue: [],
         dedupKey: `edit:${id}`,
@@ -604,13 +618,21 @@ async function resultCb(ctx: Ctx, a: A, s: Record<string, any>, arg: string) {
             await audit(a.org.id, a.userId, 'result.delete', row.id);
             return show(ctx, `🗑 결과 #${row.id} 삭제 완료`, [[btn('📄 내 결과', 'sd:a:내결과')]]);
         }
-        return show(ctx, `📄 <b>결과 #${row.id}</b> (활동일 ${row.activity_date})\n제출: ${e(row.submitter)} · ${row.created_at}${row.updated_at !== row.created_at ? ` (수정 ${row.updated_at})` : ''}\n\n${resultDetail(row, !inPrivate(ctx))}`, [
-            [btn('✏️ 수정', `sd:rs:edit:${row.id}`), btn('🗑 삭제', `sd:rs:del:${row.id}`)],
-        ]);
+        return show(
+            ctx,
+            `📄 <b>${R.FORMS[row.kind].label} #${row.id}</b> (활동일 ${row.activity_date})\n제출: ${e(row.submitter)} · ${row.created_at}${row.updated_at !== row.created_at ? ` (수정 ${row.updated_at})` : ''}\n\n${resultDetail(row, row.kind, !inPrivate(ctx))}`,
+            [[btn('✏️ 수정', `sd:rs:edit:${row.id}`), btn('🗑 삭제', `sd:rs:del:${row.id}`)]]
+        );
     }
     const f: ResultFlow | undefined = s.flow;
     if (f?.kind !== 'result' || f.orgId !== a.org.id) return show(ctx, '⌛ 진행 중인 입력이 없습니다. /특전대 에서 다시 시작해주세요.');
     switch (cmd) {
+        case 'form':
+            if (!f.form && (v === 'dig' || v === 'find')) {
+                f.form = v;
+                f.queue = [...R.FORMS[v].fields];
+            }
+            return askNext(ctx, f);
         case 'pick':
             return f.opts?.[Number(v)] !== undefined ? setField(ctx, f, f.opts[Number(v)]) : askNext(ctx, f);
         case 'skip':
@@ -619,13 +641,13 @@ async function resultCb(ctx: Ctx, a: A, s: Record<string, any>, arg: string) {
         case 'ed':
             return show(ctx, '✏️ 수정할 항목을 선택하세요.', [
                 ...chunk(
-                    R.FIELD_KEYS.map((k) => btn(R.fieldLabel(k), `sd:rs:fx:${k}`)),
+                    formFields(f).map((k) => btn(R.fieldLabel(k), `sd:rs:fx:${k}`)),
                     3
                 ),
                 [btn('◀ 돌아가기', 'sd:rs:back')],
             ]);
         case 'fx':
-            if (R.FIELD_KEYS.includes(v as R.FieldKey)) f.queue = [v as R.FieldKey];
+            if (formFields(f).includes(v as R.FieldKey)) f.queue = [v as R.FieldKey];
             return askNext(ctx, f);
         case 'ok':
             return saveResult(ctx, a, s, f);
@@ -636,10 +658,10 @@ async function resultCb(ctx: Ctx, a: A, s: Record<string, any>, arg: string) {
     await askNext(ctx, f);
 }
 
-// 1:1 대화에서 '항목: 값' 이 3줄 이상인 메시지 → 자동 정리 후 빠진 항목만 질문
+// 단체방에 '발/…' 또는 '찾/…' 양식 → 자동 정리 후 빠지거나 틀린 칸만 질문
 async function handleFreeForm(ctx: Ctx, text: string): Promise<boolean> {
-    const parsed = R.parseFreeForm(text);
-    if (parsed.recognized < 3) return false;
+    const forms = R.parseSlashForms(text);
+    if (!forms.length) return false;
     if (inPrivate(ctx)) {
         await ctx.reply('👥 결과는 특전대 단체방에 올려주세요.');
         return true;
@@ -649,29 +671,36 @@ async function handleFreeForm(ctx: Ctx, text: string): Promise<boolean> {
         await ctx.reply('🪖 결과를 제출하려면 먼저 특전대 대원 등록이 필요합니다. /특전대 를 눌러 가입 요청해주세요.');
         return true;
     }
+    if (forms.length > 1) {
+        await ctx.reply(`⚠️ 한 메시지에 ${forms.length}건이 있습니다. 결과는 한 메시지에 한 건씩 올려주세요.`);
+        return true;
+    }
     const dedupKey = `m:${ctx.chat.id}:${ctx.message.message_id}`;
     if (await S.resultExists(dedupKey)) {
         await ctx.reply('ℹ️ 이 메시지는 이미 저장되었습니다.');
         return true;
     }
+    const [form] = forms;
     const opts = await S.listOptions(a.org.id);
     const values: R.ResultValues = {};
-    const notes = parsed.conflicts.map((k) => `⚠️ ${R.fieldLabel(k)}: 서로 다른 값이 두 번 적혀 있어 다시 확인합니다.`);
-    for (const k of R.FIELD_KEYS) {
-        const raw = parsed.values[k];
+    const notes = [...form.notes];
+    for (const k of R.FORMS[form.kind].fields) {
+        const raw = form.values[k];
         if (!raw) continue;
         const r = R.validateField(k, raw, k === 'age_group' ? [] : opts[k] || []);
         if (r.ok) values[k] = r.value;
-        else notes.push(`⚠️ ${R.fieldLabel(k)}: ${r.reason}`);
+        else notes.push(`${R.fieldLabel(k)}: ${r.reason}`);
     }
-    await startResult(ctx, a as A, { values, dedupKey, notes });
+    await startResult(ctx, a as A, { kind: form.kind, values, notes, dedupKey });
     return true;
 }
 
 function resultLine(r: S.ResultRow, pii: boolean) {
-    const v = (x: string | null) => (x ? e(x) : '-');
-    const who = pii ? `${v(r.name)} · ${v(r.phone)}` : `${e(R.maskName(r.name)) || '-'} · 🔒`;
-    return `#${r.id} ${r.activity_date.slice(5)} [${v(r.submitter)}] 발 ${v(r.bal)} · ${who} · ${v(r.age_group)} · ${v(r.gender)} · ${v(r.region)}/${v(r.team)}/${v(r.guide)} · ${v(r.tool)}`;
+    const v = (k: R.FieldKey) => (r[k] ? piiCell(k, r[k]!, !pii) : '-');
+    const head = `#${r.id} ${r.activity_date.slice(5)} [${r.submitter ? e(r.submitter) : '-'}]`;
+    return r.kind === 'find'
+        ? `${head} 찾기 · ${v('name')} · ${v('birth_date')} · ${v('region')}/${v('team')}/${v('guide')} · 목표 ${v('target_month')}`
+        : `${head} 발굴 · ${v('name')} · ${v('phone')} · ${v('age_group')} · ${v('gender')} · ${v('region')}/${v('team')}/${v('guide')} · ${v('tool')} · 2차 ${v('meet_at')} ${v('meet_place')}`;
 }
 
 async function myResults(ctx: Ctx, a: A) {
@@ -791,15 +820,25 @@ async function todayReport(ctx: Ctx, a: A, args: string) {
     await show(ctx, html, buttons);
 }
 
-const STAT_FIELDS: R.FieldKey[] = ['region', 'team', 'guide', 'tool', 'age_group', 'gender'];
+const STAT_FIELDS: Record<R.FormKind, R.FieldKey[]> = {
+    dig: ['region', 'team', 'guide', 'tool', 'age_group', 'gender'],
+    find: ['region', 'team', 'guide', 'target_month'],
+};
 function resultStats(rows: S.ResultRow[]): string {
     if (!rows.length) return '• 접수된 결과가 없습니다.';
-    const lines = STAT_FIELDS.map(
-        (k) =>
-            `• ${R.fieldLabel(k)}: ${R.countBy(rows, k)
-                .map(([v, n]) => `${e(v)} ${n}`)
-                .join(' · ')}`
-    );
+    const lines: string[] = [];
+    for (const kind of ['dig', 'find'] as R.FormKind[]) {
+        const mine = rows.filter((r) => r.kind === kind);
+        lines.push(`<b>${R.FORMS[kind].label}</b> ${mine.length}건`);
+        if (!mine.length) continue;
+        for (const k of STAT_FIELDS[kind]) {
+            lines.push(
+                `• ${R.fieldLabel(k)}: ${R.countBy(mine, k)
+                    .map(([v, n]) => `${e(v)} ${n}`)
+                    .join(' · ')}`
+            );
+        }
+    }
     const incomplete = rows.filter((r) => R.missingCount(r) > 0);
     lines.push(`• 미확인(미입력 항목 있는) 결과: ${incomplete.length}건 (빈 항목 ${incomplete.reduce((s, r) => s + R.missingCount(r), 0)}개)`);
     return lines.join('\n');
@@ -894,13 +933,14 @@ async function shortage(ctx: Ctx, a: A, args: string) {
 
 /* ====================== 결과 검색 · CSV ====================== */
 
-const SEARCH_KEYS: Record<string, R.FieldKey | 'date'> = {
+const SEARCH_KEYS: Record<string, R.FieldKey | 'date' | 'kind'> = {
     기간: 'date',
     날짜: 'date',
-    발: 'bal',
+    종류: 'kind',
     이름: 'name',
     연락처: 'phone',
     생년: 'age_group',
+    생년월일: 'birth_date',
     성별: 'gender',
     인도지역: 'region',
     지역: 'region',
@@ -908,6 +948,8 @@ const SEARCH_KEYS: Record<string, R.FieldKey | 'date'> = {
     팀: 'team',
     인도자: 'guide',
     도구: 'tool',
+    장소: 'meet_place',
+    목표월: 'target_month',
 };
 
 export function parseSearch(args: string): { filter: S.ResultFilter; error?: string } {
@@ -920,6 +962,11 @@ export function parseSearch(args: string): { filter: S.ResultFilter; error?: str
     for (const [i, m] of marks.entries()) {
         const value = text.slice(m.index! + m[0].length, marks[i + 1]?.index ?? text.length).trim();
         const key = SEARCH_KEYS[m[1]];
+        if (key === 'kind') {
+            if (!/^(발굴|찾기)/.test(value)) return { filter, error: `종류는 발굴 또는 찾기: ${value}` };
+            filter.kind = value.startsWith('발굴') ? 'dig' : 'find';
+            continue;
+        }
         if (key !== 'date') {
             filter.fields![key] = value;
             continue;
@@ -936,9 +983,9 @@ async function search(ctx: Ctx, a: A, args: string) {
     const { filter, error } = parseSearch(args);
     const usage =
         '사용법: <code>/특전대 결과검색 기간:10.1~10.24 인도지역:서울 도구:전단</code>\n' +
-        '조건: 기간/날짜, 발, 이름, 연락처, 생년, 성별, 인도지역, 인도팀, 인도자, 도구 (부분 일치)';
+        '조건: 기간/날짜, 종류(발굴/찾기), 이름, 연락처, 생년, 생년월일, 성별, 인도지역, 인도팀, 인도자, 도구, 장소, 목표월 (부분 일치)';
     if (error) return void (await ctx.reply(`⚠️ ${e(error)}\n${usage}`, { parse_mode: 'HTML' }));
-    if ((filter.fields?.name || filter.fields?.phone) && !hasPerm(a, 'pii')) return void (await ctx.reply('⛔ 이름·연락처 검색은 개인정보 조회 권한이 필요합니다.'));
+    if ((filter.fields?.name || filter.fields?.phone || filter.fields?.birth_date) && !hasPerm(a, 'pii')) return void (await ctx.reply('⛔ 이름·연락처·생년월일 검색은 개인정보 조회 권한이 필요합니다.'));
     if (!args) filter.from = filter.to = today();
     const s = await session(ctx);
     s.search = { orgId: a.org.id, filter, label: args || `오늘(${today()})` };
@@ -961,13 +1008,17 @@ async function searchPage(ctx: Ctx, a: A, page: number) {
     await show(ctx, html, [...(nav.length ? [nav] : []), ...(rows.length ? [[btn(`📥 CSV${hasPerm(a, 'pii') ? ' (개인정보 포함 · 1:1로 전송)' : ''}`, 'sd:sc')]] : [])]);
 }
 
+function resultsCsvBuffer(rows: S.ResultRow[], pii: boolean) {
+    const fields = R.FIELD_KEYS.filter((k) => pii || !R.PII_FIELDS.includes(k));
+    return R.toCsv(
+        ['결과ID', '종류', '활동날짜', '제출 대원', ...fields.map(R.fieldLabel), '제출 시각', '수정 시각'],
+        rows.map((r) => [r.id, R.FORMS[r.kind].label, r.activity_date, r.submitter, ...fields.map((k) => r[k]), r.created_at, r.updated_at])
+    );
+}
+
 async function resultsCsv(ctx: Ctx, a: A, rows: S.ResultRow[], name: string) {
     const pii = hasPerm(a, 'pii');
-    const fields = R.FIELD_KEYS.filter((k) => pii || !R.PII_FIELDS.includes(k));
-    const buf = R.toCsv(
-        ['결과ID', '활동날짜', '제출 대원', ...fields.map(R.fieldLabel), '제출 시각', '수정 시각'],
-        rows.map((r) => [r.id, r.activity_date, r.submitter, ...fields.map((k) => r[k]), r.created_at, r.updated_at])
-    );
+    const buf = resultsCsvBuffer(rows, pii);
     const filename = `${name}_${nowKst().format('YYYYMMDD-HHmm')}.csv`;
     if (!pii) return sendCsv(ctx, filename, buf, `📥 ${rows.length}건 · 이름/연락처 제외`);
     await audit(a.org.id, a.userId, 'pii.export', name, { count: rows.length });
@@ -1124,9 +1175,9 @@ const HELP_MEMBER =
     '• <code>/특전대</code> — 메뉴\n' +
     '• <code>/특전대 제출</code> — 월~금 활동 가능 시간 제출·수정 (예: <code>09:00~12:00, 14:00~17:00</code>)\n' +
     '• <code>/특전대 내현황</code> — 내 요일별·주간 활동 가능 시간과 결과 건수\n' +
-    '• <code>/특전대 결과</code> — 당일 결과 단계별 입력\n' +
+    '• <code>/특전대 결과</code> — 당일 결과 단계별 입력 (발굴건/찾기건 선택)\n' +
     '• <code>/특전대 내결과</code> — 최근 결과 확인·수정·삭제\n' +
-    '• 결과 한 번에 보내기: 아래처럼 붙여넣으면 자동 정리\n<code>발: \n이름: \n연락처: \n생년: 20대 중\n성별: \n인도지역: \n인도팀: \n인도자: \n도구: </code>\n' +
+    `• 결과 한 번에 보내기 (한 메시지에 한 건, 단체방에):\n${FORM_GUIDE}\n예: <code>발/홍길동/010-1234-5678/20대중/남/서울/1팀/김철수/전단지/+10.28 19시,강남역</code>\n` +
     '• 하루 기준 시간 이상이면 충족, 겹치는 시간은 한 번만 계산. 자정을 넘는 구간은 24:00까지만 입력';
 const HELP_MANAGER =
     '\n\n👑 <b>팀 관리자</b> (봇과 1:1 대화)\n' +
@@ -1187,10 +1238,7 @@ export function registerSida(bot: Telegraf<any>) {
                 await audit(scoped.org.id, a.userId, 'pii.view', arg, { count: rows.length });
                 // 상세 목록과 CSV 모두 1:1 대화로
                 const html = `📇 <b>[상세 결과] ${arg}</b> ${rows.length}건 — 개인정보 포함, 외부 공유 금지\n\n${rows.map((r) => resultLine(r, true)).join('\n')}`;
-                const buf = R.toCsv(
-                    ['결과ID', '활동날짜', '제출 대원', ...R.FIELD_KEYS.map(R.fieldLabel), '제출 시각', '수정 시각'],
-                    rows.map((r) => [r.id, r.activity_date, r.submitter, ...R.FIELD_KEYS.map((k) => r[k]), r.created_at, r.updated_at])
-                );
+                const buf = resultsCsvBuffer(rows, true);
                 return sendPrivately(ctx, html, { buf, filename: `results_${arg}.csv`, caption: `📥 ${arg} 결과 ${rows.length}건 · 외부 공유 금지` });
             }
             if (op === 'sp') return searchPage(ctx, scoped, Number(arg));

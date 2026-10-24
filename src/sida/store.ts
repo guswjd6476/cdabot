@@ -2,7 +2,7 @@
 import { query } from '../db';
 import { listModuleSettings } from '../core/store';
 import { DayInput, Slot, WEEKDAYS } from './time';
-import { FIELD_KEYS, FieldKey, ResultValues } from './result';
+import { FIELD_KEYS, FieldKey, FormKind, ResultValues } from './result';
 
 export const MODULE_KEY = 'special';
 
@@ -120,6 +120,7 @@ export interface ResultRow extends Record<FieldKey, string | null> {
     id: number;
     org_id: number;
     user_id: number;
+    kind: FormKind;
     submitter: string | null;
     activity_date: string;
     created_at: string;
@@ -127,7 +128,7 @@ export interface ResultRow extends Record<FieldKey, string | null> {
 }
 
 const RESULT_SELECT = `
-    SELECT r.id, r.org_id, r.user_id, m.display_name AS submitter, r.activity_date::text AS activity_date,
+    SELECT r.id, r.org_id, r.user_id, r.kind, m.display_name AS submitter, r.activity_date::text AS activity_date,
            ${FIELD_KEYS.map((k) => `r.${k}`).join(', ')},
            to_char(r.created_at AT TIME ZONE 'Asia/Seoul', 'YYYY-MM-DD HH24:MI') AS created_at,
            to_char(r.updated_at AT TIME ZONE 'Asia/Seoul', 'YYYY-MM-DD HH24:MI') AS updated_at
@@ -135,12 +136,19 @@ const RESULT_SELECT = `
     LEFT JOIN cdabot_memberships m ON m.org_id = r.org_id AND m.user_id = r.user_id AND m.module_key = '${MODULE_KEY}'`;
 
 // 저장 성공 시 id, 같은 dedup_key 가 이미 있으면 null (중복 제출 방지)
-export async function insertResult(r: { orgId: number; userId: number; date: string; values: ResultValues; dedupKey: string }): Promise<number | null> {
+export async function insertResult(r: {
+    orgId: number;
+    userId: number;
+    kind: FormKind;
+    date: string;
+    values: ResultValues;
+    dedupKey: string;
+}): Promise<number | null> {
     const res = await query(
-        `INSERT INTO cdabot_results (org_id, user_id, activity_date, ${FIELD_KEYS.join(', ')}, dedup_key)
-         VALUES ($1, $2, $3, ${FIELD_KEYS.map((_, i) => `$${i + 4}`).join(', ')}, $${FIELD_KEYS.length + 4})
+        `INSERT INTO cdabot_results (org_id, user_id, kind, activity_date, ${FIELD_KEYS.join(', ')}, dedup_key)
+         VALUES ($1, $2, $3, $4, ${FIELD_KEYS.map((_, i) => `$${i + 5}`).join(', ')}, $${FIELD_KEYS.length + 5})
          ON CONFLICT (dedup_key) DO NOTHING RETURNING id;`,
-        [r.orgId, r.userId, r.date, ...FIELD_KEYS.map((k) => r.values[k] ?? null), r.dedupKey]
+        [r.orgId, r.userId, r.kind, r.date, ...FIELD_KEYS.map((k) => r.values[k] ?? null), r.dedupKey]
     );
     return res.rows[0]?.id ?? null;
 }
@@ -169,6 +177,7 @@ export interface ResultFilter {
     from?: string;
     to?: string;
     userId?: number;
+    kind?: FormKind;
     fields?: Partial<Record<FieldKey, string>>; // 부분 일치
 }
 
@@ -183,20 +192,21 @@ export async function listResults(orgId: number, f: ResultFilter = {}): Promise<
     if (f.from) add('r.activity_date >= ?', f.from);
     if (f.to) add('r.activity_date <= ?', f.to);
     if (f.userId) add('r.user_id = ?', f.userId);
+    if (f.kind) add('r.kind = ?', f.kind);
     for (const [k, v] of Object.entries(f.fields || {})) {
         if (FIELD_KEYS.includes(k as FieldKey) && v) add(`r.${k} ILIKE ?`, `%${v.replace(/[\\%_]/g, '\\$&')}%`);
     }
     return (await query(`${RESULT_SELECT} WHERE ${where.join(' AND ')} ORDER BY r.activity_date DESC, r.id DESC;`, params)).rows;
 }
 
-// 개인정보 보관기간이 설정된 조직: 기간이 지난 결과의 이름·연락처 삭제 (통계용 다른 항목은 유지)
+// 개인정보 보관기간이 설정된 조직: 기간이 지난 결과의 이름·연락처·생년월일 삭제 (통계용 다른 항목은 유지)
 export async function purgeExpiredPii(): Promise<number> {
     let total = 0;
     for (const { org_id, settings } of await listModuleSettings(MODULE_KEY)) {
         const days = Number(settings.pii_retention_days);
         if (!days) continue;
         const res = await query(
-            `UPDATE cdabot_results SET name = NULL, phone = NULL, pii_purged_at = NOW()
+            `UPDATE cdabot_results SET name = NULL, phone = NULL, birth_date = NULL, pii_purged_at = NOW()
              WHERE org_id = $1 AND pii_purged_at IS NULL AND activity_date < CURRENT_DATE - $2::int RETURNING id;`,
             [org_id, days]
         );

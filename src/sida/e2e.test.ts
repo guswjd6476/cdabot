@@ -179,38 +179,51 @@ test('[6][17] 12명 시간표 · 미제출 · 부족시간 · CSV, 시간표와 
     assert.match(personal, /U101,3,미충족,5,미충족,,활동 불가,6,충족,3,미충족,17\r\n/);
 });
 
-test('[8][9][11] 자유 형식 결과 — 자동 정리, 빠진 항목만 질문, 중복 방지', async () => {
-    const form = '발: 3\n이름: 홍길동\n연락처: 01012345678\n생년: 20대 중\n성별: 남\n인도지역: 서울\n인도팀: 1팀\n인도자: 김철수\n도구: 전단지';
+test('[8][9][11] 발굴건·찾기건 한 줄 양식 — 자동 정리, 빠진 칸만 질문, 중복 방지', async () => {
+    const form = '❗️발굴건\n발/홍길동/01012345678/20대 중/남/서울/1팀/김철수/전단지/+10.28 19시,강남역';
     const r1 = await send(101, form, 5000);
-    assert.match(r1, /자동 정리 결과[\s\S]*연락처: 010-1234-5678/);
+    assert.match(r1, /자동 정리 결과 — 발굴건[\s\S]*연락처: 010-1234-5678/);
+    assert.match(r1, /10\. 2차 만남 장소: 강남역/);
     assert.match(r1, /결과 확인/);
-    assert.match(await press(101, 'sd:rs:ok'), /저장 완료/);
+    assert.match(await press(101, 'sd:rs:ok'), /발굴건 결과 #\d+ 저장 완료/);
     assert.match(await send(101, form, 5000), /이미 저장/); // 같은 메시지 재처리
     assert.match(await press(101, 'sd:rs:ok'), /진행 중인 입력이 없습니다/); // 확인 버튼 두 번
     assert.equal((await S.listResults(1)).length, 1);
+    assert.match(await send(101, '발/a/b\n발/c/d'), /한 메시지에 한 건씩/);
 
-    const r2 = await send(101, '발: 2\n이름: 김영희\n생년: 25살\n성별: 여\n인도지역: 부산');
+    const r2 = await send(101, '발/김영희//25살/여/부산');
     assert.match(r2, /생년 구분은 .* 중에서 선택/); // 허용 밖 값은 확인
-    assert.match(r2, /연락처, 생년 구분, 인도팀, 인도자, 도구/); // 빠진 항목만 (추측 없음)
+    assert.match(r2, /연락처, 생년 구분, 인도팀, 인도자, 도구, 2차 만남 일시, 2차 만남 장소/); // 빠진 칸만 (추측 없음)
     assert.match(await send(101, '1234'), /연락처 형식을 확인/);
     assert.match(await send(101, '010-2222-3333'), /생년 구분/);
     assert.match(await press(101, 'sd:rs:pick:1'), /인도팀/);
     await press(101, 'sd:rs:skip');
     await press(101, 'sd:rs:skip');
-    const review = await send(101, '책자');
-    assert.match(review, /7\. 인도팀: <i>\(미입력\)<\/i>/);
+    assert.match(await send(101, '책자'), /2차 만남 일시/);
+    await press(101, 'sd:rs:skip');
+    const review = await press(101, 'sd:rs:skip');
+    assert.match(review, /3\. 생년 구분: 20대 중/);
+    assert.match(review, /6\. 인도팀: <i>\(미입력\)<\/i>/);
     await press(101, 'sd:rs:ok');
     const [second] = await S.listResults(1);
-    assert.deepEqual([second.phone, second.age_group, second.team, second.tool], ['010-2222-3333', '20대 중', null, '책자']);
+    assert.deepEqual([second.kind, second.phone, second.age_group, second.team, second.tool], ['dig', '010-2222-3333', '20대 중', null, '책자']);
 
-    // 단계별 입력
-    await send(101, '/특전대 결과');
-    for (const v of ['1', '이몽룡', '010-3333-4444']) await send(101, v);
+    // 찾기건
+    const r3 = await send(101, '찾/이몽룡/990315/대전/3팀/성춘향/11월');
+    assert.match(r3, /찾기건[\s\S]*2\. 생년월일: 990315[\s\S]*6\. 목표월: 11월/);
+    await press(101, 'sd:rs:ok');
+    const [find] = await S.listResults(1);
+    assert.deepEqual([find.kind, find.birth_date, find.target_month, find.phone], ['find', '990315', '11월', null]);
+
+    // 단계별 입력 (양식 고르기 → 칸마다 질문)
+    assert.match(await send(101, '/특전대 결과'), /어떤 결과인가요/);
+    assert.match(await press(101, 'sd:rs:form:dig'), /발굴건<\/b> \[1\/10\][\s\S]*이름/);
+    for (const v of ['박영수', '010-3333-4444']) await send(101, v);
     await press(101, 'sd:rs:pick:4'); // 모름
     await press(101, 'sd:rs:pick:0'); // 성별 목록 첫 값
-    for (const v of ['서울', '2팀', '홍길동', '전단지']) await send(101, v);
+    for (const v of ['서울', '2팀', '홍길동', '전단지', '10.30 15시', '시청역']) await send(101, v);
     assert.match(await press(101, 'sd:rs:ok'), /저장 완료/);
-    assert.equal((await S.listResults(1)).length, 3);
+    assert.equal((await S.listResults(1)).length, 4);
 });
 
 test('[10][12] 결과 수정이 일일 보고서·검색에 반영, 가능 시간과 결과 건수는 따로', async () => {
@@ -218,22 +231,24 @@ test('[10][12] 결과 수정이 일일 보고서·검색에 반영, 가능 시�
     await press(101, `sd:rs:edit:${first.id}`);
     await press(101, 'sd:rs:ed');
     assert.match(await press(101, 'sd:rs:fx:region'), /인도지역/);
-    assert.match(await send(101, '대구'), /6\. 인도지역: 대구/);
+    assert.match(await send(101, '대구'), /5\. 인도지역: 대구/);
     assert.match(await press(101, 'sd:rs:ok'), /수정 완료/);
     const log = (await query(`SELECT detail FROM cdabot_audit_logs WHERE action = 'result.update';`)).rows[0].detail;
     assert.deepEqual(log, { changed: ['region'] }); // 감사 로그에 개인정보 값은 남기지 않음
 
     const day = await send(ADMIN, '/특전대 오늘현황');
-    assert.match(day, /당일 결과<\/b> — 총 3건/);
-    const regionLine = day.match(/인도지역: (.*)/)![1];
+    assert.match(day, /당일 결과<\/b> — 총 4건/);
+    assert.match(day, /<b>발굴건<\/b> 3건[\s\S]*<b>찾기건<\/b> 1건\n• 인도지역: 대전 1/);
+    const regionLine = day.match(/인도지역: (.*)/)![1]; // 발굴건 쪽
     assert.deepEqual(regionLine.split(' · ').sort(), ['대구 1', '부산 1', '서울 1']); // 수정 전 값(서울→대구)은 사라짐
     assert.match(day, /인도팀: (1팀 1 · 2팀 1|2팀 1 · 1팀 1) · \(미입력\) 1/); // 미입력은 맨 뒤 별도
-    assert.match(day, /U101: .* \/ 결과 3건/);
+    assert.match(day, /U101: .* \/ 결과 4건/);
     assert.match(await send(ADMIN, '/특전대 결과검색 인도지역:대구'), /총 <b>1<\/b>건/);
     assert.match(await send(ADMIN, `/특전대 결과검색 기간:${TODAY}~${TODAY} 도구:전단`), /총 <b>2<\/b>건/);
+    assert.match(await send(ADMIN, '/특전대 결과검색 종류:찾기'), /총 <b>1<\/b>건/);
 
     const people = await send(ADMIN, '/특전대 개인현황');
-    assert.match(people, /<b>U101<\/b>\n.*결과 3건\n.*주간 17시간 · 결과 3건/);
+    assert.match(people, /<b>U101<\/b>\n.*결과 4건\n.*주간 17시간 · 결과 4건/);
     assert.match(people, /<b>대원10<\/b>\n.*결과 0건\n.*주간 ⏳ 미제출 · 결과 0건/);
 });
 
@@ -244,12 +259,13 @@ test('[16] 개인정보 — 권한 없는 관리자에게 연락처 비공개, C
     assert.match(await send(301, '/특전대 결과검색 이름:홍'), /개인정보 조회 권한이 필요/);
     assert.match(await press(301, `sd:td:${nowKst().format('YYYY-MM-DD')}`), /권한이 없습니다/);
     await press(301, 'sd:sc');
-    assert.ok(docs()[0].startsWith('﻿결과ID,활동날짜,제출 대원,발,생년 구분,'));
+    assert.ok(docs()[0].startsWith('﻿결과ID,종류,활동날짜,제출 대원,생년 구분,성별,'));
     assert.ok(!docs()[0].includes('010-'));
+    assert.ok(!(await send(301, '/특전대 결과검색 종류:찾기')).includes('990315'), '생년월일도 개인정보');
 
     await send(ADMIN, '/특전대 결과검색 인도지역:대구');
     await press(ADMIN, 'sd:sc');
-    assert.match(docs()[0], /^﻿결과ID,활동날짜,제출 대원,발,이름,연락처,.*\r\n\d+,\d{4}-\d{2}-\d{2},U101,3,홍길동,010-1234-5678,20대 중,남,대구,1팀,김철수,전단지,/);
+    assert.match(docs()[0], /^﻿결과ID,종류,활동날짜,제출 대원,이름,연락처,생년 구분,생년월일,.*\r\n\d+,발굴건,\d{4}-\d{2}-\d{2},U101,홍길동,010-1234-5678,20대 중,,남,대구,1팀,김철수,전단지,10\.28 19시,강남역,,/);
     assert.ok((await query(`SELECT 1 FROM cdabot_audit_logs WHERE action = 'pii.export';`)).rows.length);
 });
 
@@ -257,7 +273,7 @@ test('단체방(대원) / 1:1 대화(관리자) — 장소 안내, 남의 버튼
     const dm = (from: number, text: string) => send(from, text, ++messageId, from);
     // 장소가 틀리면 안내
     assert.match(await dm(101, '/특전대 제출'), /단체방에서 사용해주세요/);
-    assert.match(await dm(101, '발: 1\n이름: 가\n연락처: 010-1111-2222'), /단체방에 올려주세요/);
+    assert.match(await dm(101, '발/가/010-1111-2222'), /단체방에 올려주세요/);
     assert.match(await send(ADMIN, '/특전대 시간표', ++messageId, GROUP), /1:1 대화에서 사용해주세요/);
     assert.match(await press(ADMIN, 'sd:tc:1-0', GROUP), /1:1 대화에서 사용해주세요/);
     assert.match(await send(101, '/특전대 시간표'), /권한이 없습니다/); // 권한 없는 기능은 장소와 무관하게 거부
@@ -266,20 +282,20 @@ test('단체방(대원) / 1:1 대화(관리자) — 장소 안내, 남의 버튼
     await send(101, '/특전대');
     assert.ok(labels().includes('📝 활동 시간 제출') && !labels().includes('🗓 전체 활동 시간표'), '단체방 메뉴는 대원 기능만');
 
-    assert.match(await send(205, '/특전대 결과'), /발/);
+    assert.match(await send(205, '/특전대 결과'), /어떤 결과인가요/);
     const data = calls.flatMap((c) => c.payload?.reply_markup?.inline_keyboard?.flat() ?? []).map((b: any) => b.callback_data);
     assert.ok(data.length && data.every((d: string) => d.endsWith('~205')), '버튼에 연 사람 표시');
     assert.equal(calls[0].payload.reply_parameters.message_id, messageId); // 원래 메시지에 답장
 
     assert.equal(await send(101, '오늘 다들 수고했어요'), ''); // 다른 사람의 대화는 입력으로 먹지 않음
     assert.equal(await dm(205, '9'), ''); // 다른 방(1:1)에서는 이어지지 않음
-    assert.match(await send(205, '7'), /이름/);
+    assert.match(await press(205, 'sd:rs:form:find~205'), /찾기건[\s\S]*이름/);
     await press(101, 'sd:rs:cx~205');
     assert.ok(calls.some((c) => c.method === 'answerCallbackQuery' && c.payload.show_alert), '남의 버튼은 차단');
     assert.match(await press(205, 'sd:rs:cx~205'), /취소/);
 
     // 단체방 자유 형식 결과 → 저장
-    assert.match(await send(205, '발: 1\n이름: 방철수\n연락처: 010-5555-6666\n생년: 30대\n성별: 남\n인도지역: 광주\n인도팀: 3팀\n인도자: 김\n도구: 책'), /결과 확인/);
+    assert.match(await send(205, '발/방철수/010-5555-6666/30대/남/광주/3팀/김/책/10.31 14시,광주역'), /결과 확인/);
     assert.match(await press(205, 'sd:rs:ok~205'), /저장 완료/);
     assert.ok(!(await send(205, '/특전대 내결과')).includes('010-5555-6666'), '단체방 내 결과 목록은 연락처 가림');
 
@@ -332,7 +348,7 @@ test('[14] 조직별 데이터 분리', async () => {
     const org2 = (await createOrg('제2조직'))!;
     const u = await upsertUser(401, 'U401');
     const m = await upsertMembership(org2.id, u.id, S.MODULE_KEY, '이조직대원', 'active');
-    const id = (await S.insertResult({ orgId: org2.id, userId: u.id, date: nowKst().format('YYYY-MM-DD'), values: { name: '타조직', tool: '전단지' }, dedupKey: 'org2-1' }))!;
+    const id = (await S.insertResult({ orgId: org2.id, userId: u.id, kind: 'dig', date: nowKst().format('YYYY-MM-DD'), values: { name: '타조직', tool: '전단지' }, dedupKey: 'org2-1' }))!;
     assert.ok(!(await S.listResults(1)).some((r) => r.id === id));
     assert.equal(await S.getResult(1, id), undefined);
     assert.match(await send(301, `/특전대 결과수정 ${id}`), /찾을 수 없습니다/);
@@ -377,7 +393,7 @@ test('[18] 새 주차가 지난 주차를 덮어쓰지 않음 · 마감/재개�
 test('[15] 봇 재시작 후에도 제출 데이터·진행 중 입력 유지', async () => {
     // (1) 봇 인스턴스 재생성(메모리 초기화) 후 진행 중이던 입력 이어서
     await send(205, '/특전대 결과');
-    await send(205, '5');
+    await press(205, 'sd:rs:form:dig');
     bot = newBot();
     assert.match(await send(205, '박지성'), /연락처/);
 

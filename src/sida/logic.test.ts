@@ -2,7 +2,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { buildTimetable, dayStatus, mergeSlots, parseRange, parseRanges, Slot, totalMinutes } from './time';
-import { countBy, missingCount, normalizePhone, parseFreeForm, toCsv, validateField } from './result';
+import { countBy, missingCount, normalizePhone, parseSlashForms, toCsv, validateField } from './result';
 
 const h = (s: string) => {
     const r = parseRanges(s);
@@ -87,36 +87,49 @@ test('[5][17] 타임테이블 — 실제 구간 경계로 나누고, 개인 합�
     }
 });
 
-test('[8] 자유 형식 결과 → 필드별 정리', () => {
-    const r = parseFreeForm('발: 3\n이름: 홍길동\n연락처: 010 1234 5678\n생년: 20대 중\n성별: 남\n인도지역: 서울\n인도팀: 1팀\n인도자: 김철수\n도구: 전단지');
-    assert.equal(r.recognized, 9);
+test('[8] 발굴건 한 줄 양식 → 필드별 정리 (제목 줄 무시, 2차 만남 두 가지 표기)', () => {
+    const [r] = parseSlashForms('❗️발굴건\n발/홍길동/010 1234 5678/20대중/남/서울/1팀/김철수/전단지/+10.28 19시,강남역 카페');
+    assert.equal(r.kind, 'dig');
     assert.deepEqual(r.values, {
-        bal: '3',
         name: '홍길동',
         phone: '010 1234 5678',
-        age_group: '20대 중',
+        age_group: '20대중',
         gender: '남',
         region: '서울',
         team: '1팀',
         guide: '김철수',
         tool: '전단지',
+        meet_at: '10.28 19시',
+        meet_place: '강남역 카페',
     });
+    assert.deepEqual(r.notes, []);
+    const [slash] = parseSlashForms('발 / 김 / 01011112222 / 30대 / 여 / 부산 / 2팀 / 이 / 책자 / 10.29 오후2시 / 서면');
+    assert.deepEqual([slash.values.meet_at, slash.values.meet_place], ['10.29 오후2시', '서면']);
     assert.deepEqual(validateField('phone', r.values.phone!), { ok: true, value: '010-1234-5678' });
     assert.deepEqual(validateField('age_group', '20대중'), { ok: true, value: '20대 중' });
 });
 
-test('[9] 누락·불명확 값은 추측하지 않음', () => {
-    const r = parseFreeForm('이름: 홍길동\n연락처:\n생년: 20대 중\n도구: 전단\n도구: 책자\n메모: 아무거나');
-    assert.equal(r.values.phone, undefined); // 비어 있으면 누락
-    assert.equal(r.values.bal, undefined); // 아예 없는 항목
-    assert.equal(r.values.tool, undefined); // 서로 다른 값 두 번 → 다시 질문
-    assert.deepEqual(r.conflicts, ['tool']);
+test('[8] 찾기건 한 줄 양식', () => {
+    const [r] = parseSlashForms('찾／이몽룡／990315／대전／3팀／성춘향／11월'); // 전각 슬래시도 인식
+    assert.equal(r.kind, 'find');
+    assert.deepEqual(r.values, { name: '이몽룡', birth_date: '990315', region: '대전', team: '3팀', guide: '성춘향', target_month: '11월' });
+    assert.equal(validateField('birth_date', '모름').ok, false);
+    assert.equal(missingCount({ kind: 'find', name: 'a', birth_date: '1', region: 'x', team: 'y', guide: 'z' }), 1); // 찾기건 항목만 셈
+});
+
+test('[9] 빈 칸·모자란 칸은 추측하지 않음', () => {
+    const [r] = parseSlashForms('발/홍길동//20대 중/남/서울');
+    assert.deepEqual(Object.keys(r.values), ['name', 'age_group', 'gender', 'region']); // 연락처(빈 칸), 인도팀~장소(없음)는 다시 질문
+    const [over] = parseSlashForms('찾/가/1/대전/3팀/나/11월/추가칸');
+    assert.equal(over.values.target_month, undefined); // 칸이 남으면 어디가 밀렸는지 모름 → 다시 질문
+    assert.equal(over.notes.length, 1);
+    assert.deepEqual(parseSlashForms('오늘 발 아파요\n발굴건 화이팅'), []); // 양식이 아닌 대화
+    assert.equal(parseSlashForms('발/a/b\n찾/c/d').length, 2);
     assert.equal(validateField('age_group', '25살').ok, false);
     assert.equal(validateField('phone', '1234').ok, false);
     assert.equal(validateField('gender', '기타', ['남', '여']).ok, false); // 목록 밖 값 임의 분류 안 함
     assert.deepEqual(validateField('region', '대전', ['서울']), { ok: true, value: '대전' }); // 직접 입력 허용
     assert.equal(normalizePhone('02-123-4567'), '021234567');
-    assert.equal(missingCount({ name: 'a', phone: null }), 8);
 });
 
 test('[16] CSV — BOM, 한글, 따옴표·쉼표·줄바꿈, 수식 주입 방지', () => {
