@@ -24,53 +24,6 @@ export function escapeHtml(text?: string | number | null): string {
     return String(text).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
-// '지역 팀 이름' / '지역/팀/이름' / '지역1팀 이름' 형식 파싱
-export function parseMemberString(raw: string): { region: string; team: string; name: string } | null {
-    if (!raw) return null;
-    const cleaned = raw.trim();
-
-    if (cleaned.includes('/')) {
-        const parts = cleaned.split('/').map((s) => s.trim());
-        if (parts.length >= 3) {
-            return { region: parts[0], team: parts[1].replace(/팀/g, ''), name: parts[2] };
-        }
-    }
-
-    const spaceParts = cleaned.split(/\s+/).filter(Boolean);
-    if (spaceParts.length >= 3) {
-        return { region: spaceParts[0], team: spaceParts[1].replace(/팀/g, ''), name: spaceParts[2] };
-    }
-
-    if (spaceParts.length === 2) {
-        const m = spaceParts[0].match(/^([가-힣]+?)(\d+)팀?$/);
-        if (m) {
-            return { region: m[1], team: m[2], name: spaceParts[1] };
-        }
-    }
-
-    return null;
-}
-
-/* ====================== 📝 보고 양식 ====================== */
-
-// 보고 글에서 '항목: 숫자' 줄만 뽑기 (예: '• 전도: 3명' → { 전도: 3 }) — 항목명이 자유라 역할마다 양식이 달라도 됨
-// '시간: 19:00', '날짜: 10.8' 같은 줄은 숫자 하나로 끝나지 않으므로 제외
-export function parseReportNumbers(rawText: string): Record<string, number> {
-    const result: Record<string, number> = {};
-    for (const line of rawText.normalize('NFKC').split('\n')) {
-        const m = line.match(/^\s*[-•·*]?\s*(?:\d+[.)]\s*)?([^:]+?)\s*:\s*(\d+)\s*[가-힣]{0,2}\s*$/);
-        if (m) result[m[1]] = (result[m[1]] || 0) + parseInt(m[2], 10);
-    }
-    return result;
-}
-
-// 항목 합계 표시 (예: 전도 3 · 섭외 1)
-export function formatReportNumbers(data: Record<string, number>): string {
-    return Object.entries(data)
-        .map(([k, v]) => `${escapeHtml(k)} ${v}`)
-        .join(' · ');
-}
-
 /* ====================== 📅 날짜 ====================== */
 
 // 입력 문자열에서 날짜를 찾아 'YYYY-MM-DD'로 변환 (실패 시 null)
@@ -118,62 +71,6 @@ export function parseFlexibleDate(rawText: string): string | null {
     return null;
 }
 
-// 입력한 요일이 실제 날짜의 요일과 다르면 안내 문구 반환 (예: 10.8(월) 인데 10/8이 목요일)
-export function getWeekdayWarning(rawText: string, ymd: string): string {
-    const text = rawText.normalize('NFKC');
-    const m = text.match(/\(\s*([월화수목금토일])(?:요일)?\s*\)|([월화수목금토일])요일/);
-    if (!m) return '';
-    const written = m[1] || m[2];
-    const actual = '일월화수목금토'[dayjs(ymd).day()];
-    return written === actual
-        ? ''
-        : `\n\n⚠️ 입력한 요일(${written})과 실제 요일이 다릅니다: <b>${ymd} (${actual})</b>\n날짜가 틀렸다면 다시 입력해주세요.`;
-}
-
-// 지난 날짜면 안내 문구 반환
-export function getPastDateWarning(ymd: string): string {
-    const todayStr = nowKst().format('YYYY-MM-DD');
-    return ymd < todayStr ? `\n\n⚠️ <b>이미 지난 날짜</b>입니다 (${ymd}). 잘못 입력했다면 다시 입력해주세요.` : '';
-}
-
-// 입력에서 시간 추출 (예: 19:00, 19시, 오후 7시, 7시 반, 오후 2시 30분) — 표시용 문자열 반환, 없으면 ''
-// 오전/오후 표기가 없고 12시 미만이면 입력 그대로 'N시'로 둔다 (오전/오후 추측하지 않음)
-export function parseFlexibleTime(rawText: string): string {
-    if (!rawText) return '';
-    const text = rawText.normalize('NFKC');
-    const m =
-        text.match(/(오전|오후|아침|새벽|낮|저녁|밤)?\s*(\d{1,2})\s*:\s*(\d{2})(?!\d)/) ||
-        text.match(/(오전|오후|아침|새벽|낮|저녁|밤)?\s*(\d{1,2})\s*시(?!간)\s*(?:(\d{1,2})\s*분|(반))?/);
-    if (!m) return '';
-    let hour = parseInt(m[2], 10);
-    const minute = m[4] === '반' ? 30 : m[3] ? parseInt(m[3], 10) : 0;
-    if (hour > 24 || minute > 59) return '';
-    const period = m[1];
-    if (period && ['오후', '저녁', '밤'].includes(period) && hour < 12) hour += 12;
-    if (period === '낮' && hour <= 6) hour += 12;
-    if (period && ['오전', '아침', '새벽'].includes(period) && hour === 12) hour = 0;
-    if (!period && hour < 12) return minute ? `${hour}시 ${minute}분` : `${hour}시`;
-    return `${String(hour % 24).padStart(2, '0')}:${String(minute).padStart(2, '0')}`;
-}
-
-// 시간 추출 전에 날짜 부분(10.8 / 2026.10.8 / 10월 8일)을 제거 — '10.8'의 8을 시간으로 오인하지 않도록
-export function stripDatePart(rawText: string): string {
-    return rawText
-        .normalize('NFKC')
-        .replace(/(?:(?:\d{4}|1[3-9]|[2-9]\d)\s*[\-\/\.년]\s*)?\d{1,2}\s*[\-\/\.월]\s*\d{1,2}\s*일?/, ' ');
-}
-
-// 날짜(+시간) 표시용
-export function formatMeetingWhen(date: string, time?: string | null): string {
-    return time ? `${date} ${time}` : date;
-}
-
-// 날짜 + 요일 표시 (예: 2026-10-08 (목))
-export function formatYmdWithDay(ymd: string): string {
-    const d = dayjs(ymd);
-    return d.isValid() ? `${ymd} (${'일월화수목금토'[d.day()]})` : ymd;
-}
-
 /* ====================== 💬 텔레그램 메시지 ====================== */
 
 // 텔레그램 메시지 길이 제한(4096자) 대응: 줄 단위로 나눠 여러 메시지로 전송 (HTML 태그는 줄 안에서 닫혀 있어야 함)
@@ -197,29 +94,5 @@ export async function replyLong(ctx: any, html: string, lastMessageExtra: Record
     const parts = splitLongMessage(html);
     for (let i = 0; i < parts.length; i++) {
         await ctx.reply(parts[i], { parse_mode: 'HTML', ...(i === parts.length - 1 ? lastMessageExtra : {}) });
-    }
-}
-
-export async function sendChunkedList<T>(
-    ctx: any,
-    header: string,
-    items: T[],
-    renderItem: (item: T, globalIndex: number) => string,
-    chunkSize = 15,
-    lastMessageExtra: Record<string, unknown> = {}
-) {
-    for (let i = 0; i < items.length; i += chunkSize) {
-        const chunk = items.slice(i, i + chunkSize);
-        let message =
-            i === 0
-                ? header
-                : `📋 <b>[목록 계속 (${i + 1}~${Math.min(i + chunkSize, items.length)})]</b>\n━━━━━━━━━━━━━━━━━━\n\n`;
-
-        chunk.forEach((item, idx) => {
-            message += renderItem(item, i + idx + 1);
-        });
-
-        const isLast = i + chunkSize >= items.length;
-        await replyLong(ctx, message, isLast ? lastMessageExtra : {});
     }
 }

@@ -48,12 +48,14 @@ const docs = () => calls.filter((c) => c.method === 'sendDocument').map((c) => (
 
 const GROUP = -100123;
 const chat = (from: number, id = from) => ({ id, type: id < 0 ? 'supergroup' : 'private' });
-async function send(from: number, text: string, mid = ++messageId, chatId = from) {
+// 대원은 단체방, 관리자(시스템 관리자·301 팀 관리자)는 1:1 대화가 기본
+const home = (from: number) => (from === ADMIN || from === 301 ? from : GROUP);
+async function send(from: number, text: string, mid = ++messageId, chatId = home(from)) {
     calls = [];
     await bot.handleUpdate({ update_id: ++updateId, message: { message_id: mid, date: Math.floor(Date.now() / 1000), chat: chat(from, chatId), from: user(from), text } } as any);
     return texts();
 }
-async function press(from: number, data: string, chatId = from) {
+async function press(from: number, data: string, chatId = home(from)) {
     calls = [];
     await bot.handleUpdate({
         update_id: ++updateId,
@@ -251,52 +253,57 @@ test('[16] 개인정보 — 권한 없는 관리자에게 연락처 비공개, C
     assert.ok((await query(`SELECT 1 FROM cdabot_audit_logs WHERE action = 'pii.export';`)).rows.length);
 });
 
-test('단체방 운영 — 방에서 제출·조회, 남의 버튼 차단, 개인정보 상세는 1:1로', async () => {
-    const g = (from: number, text: string) => send(from, text, ++messageId, GROUP);
-    const gp = (from: number, data: string) => press(from, data, GROUP);
+test('단체방(대원) / 1:1 대화(관리자) — 장소 안내, 남의 버튼 차단, 개인정보 상세는 1:1로', async () => {
+    const dm = (from: number, text: string) => send(from, text, ++messageId, from);
+    // 장소가 틀리면 안내
+    assert.match(await dm(101, '/특전대 제출'), /단체방에서 사용해주세요/);
+    assert.match(await dm(101, '발: 1\n이름: 가\n연락처: 010-1111-2222'), /단체방에 올려주세요/);
+    assert.match(await send(ADMIN, '/특전대 시간표', ++messageId, GROUP), /1:1 대화에서 사용해주세요/);
+    assert.match(await press(ADMIN, 'sd:tc:1-0', GROUP), /1:1 대화에서 사용해주세요/);
+    assert.match(await send(101, '/특전대 시간표'), /권한이 없습니다/); // 권한 없는 기능은 장소와 무관하게 거부
+    await send(ADMIN, '/특전대');
+    assert.ok(labels().includes('🗓 전체 활동 시간표') && !labels().includes('📝 활동 시간 제출'), '1:1 메뉴는 관리자 기능만');
+    await send(101, '/특전대');
+    assert.ok(labels().includes('📝 활동 시간 제출') && !labels().includes('🗓 전체 활동 시간표'), '단체방 메뉴는 대원 기능만');
 
-    assert.match(await g(205, '/특전대 결과'), /발/);
+    assert.match(await send(205, '/특전대 결과'), /발/);
     const data = calls.flatMap((c) => c.payload?.reply_markup?.inline_keyboard?.flat() ?? []).map((b: any) => b.callback_data);
     assert.ok(data.length && data.every((d: string) => d.endsWith('~205')), '버튼에 연 사람 표시');
     assert.equal(calls[0].payload.reply_parameters.message_id, messageId); // 원래 메시지에 답장
 
-    assert.equal(await g(101, '오늘 다들 수고했어요'), ''); // 다른 사람의 대화는 입력으로 먹지 않음
-    assert.equal(await send(205, '9'), ''); // 같은 사람이라도 다른 방(1:1)에서는 이어지지 않음
-    assert.match(await g(205, '7'), /이름/);
-    await gp(101, 'sd:rs:cx~205');
+    assert.equal(await send(101, '오늘 다들 수고했어요'), ''); // 다른 사람의 대화는 입력으로 먹지 않음
+    assert.equal(await dm(205, '9'), ''); // 다른 방(1:1)에서는 이어지지 않음
+    assert.match(await send(205, '7'), /이름/);
+    await press(101, 'sd:rs:cx~205');
     assert.ok(calls.some((c) => c.method === 'answerCallbackQuery' && c.payload.show_alert), '남의 버튼은 차단');
-    assert.match(await gp(205, 'sd:rs:cx~205'), /취소/);
+    assert.match(await press(205, 'sd:rs:cx~205'), /취소/);
 
     // 단체방 자유 형식 결과 → 저장
-    assert.match(await g(205, '발: 1\n이름: 방철수\n연락처: 010-5555-6666\n생년: 30대\n성별: 남\n인도지역: 광주\n인도팀: 3팀\n인도자: 김\n도구: 책'), /결과 확인/);
-    assert.match(await gp(205, 'sd:rs:ok~205'), /저장 완료/);
+    assert.match(await send(205, '발: 1\n이름: 방철수\n연락처: 010-5555-6666\n생년: 30대\n성별: 남\n인도지역: 광주\n인도팀: 3팀\n인도자: 김\n도구: 책'), /결과 확인/);
+    assert.match(await press(205, 'sd:rs:ok~205'), /저장 완료/);
+    assert.ok(!(await send(205, '/특전대 내결과')).includes('010-5555-6666'), '단체방 내 결과 목록은 연락처 가림');
 
     // 30분 넘게 방치된 입력은 단체방 대화를 먹지 않음
-    await g(205, '/특전대 결과');
+    await send(205, '/특전대 결과');
     const sess = await loadSession(205);
     sess.flow.at = Date.now() - 31 * 60 * 1000;
     await saveSession(205, sess);
-    assert.equal(await g(205, 'ㅋㅋ'), '');
+    assert.equal(await send(205, 'ㅋㅋ'), '');
 
-    // 관리자: 단체방 화면에는 이름·연락처 가림, 상세·CSV 는 1:1 로
-    const found = await g(ADMIN, '/특전대 결과검색 인도지역:광주');
-    assert.match(found, /총 <b>1<\/b>건/);
-    assert.ok(!found.includes('010-5555-6666') && !found.includes('방철수'));
-    await gp(ADMIN, `sd:td:${nowKst().format('YYYY-MM-DD')}~${ADMIN}`);
+    // 관리자 1:1: 상세 결과·CSV 는 1:1 로
+    assert.match(await send(ADMIN, '/특전대 결과검색 인도지역:광주'), /010-5555-6666/);
+    await press(ADMIN, `sd:td:${nowKst().format('YYYY-MM-DD')}`);
     assert.ok(calls.some((c) => c.method === 'sendMessage' && c.payload.chat_id === ADMIN && /상세 결과/.test(c.payload.text)));
     assert.ok(calls.some((c) => c.method === 'sendDocument' && c.payload.chat_id === ADMIN));
-    assert.ok(!calls.some((c) => c.payload.chat_id === GROUP && /010-/.test(c.payload.text || '')));
-    assert.match(texts(), /1:1 대화로 보냈습니다/);
-    await gp(ADMIN, `sd:sc~${ADMIN}`);
-    assert.ok(calls.some((c) => c.method === 'sendDocument' && c.payload.chat_id === ADMIN), '개인정보 CSV 도 1:1');
 
-    // 가입 요청은 방에서 관리자가 바로 승인
-    assert.match(await g(606, '/특전대'), /등록되어 있지 않습니다/);
-    await gp(606, 'sd:jo:1~606');
-    const approve = calls.flatMap((c) => c.payload?.reply_markup?.inline_keyboard?.flat() ?? []).find((b: any) => b.text.includes('승인'));
-    assert.match(approve.callback_data, /^sd:ap:1-\d+$/); // 관리자 누구나 누를 수 있게 표시 없음
-    assert.match(await gp(101, approve.callback_data), /권한이 없습니다/);
-    assert.match(await gp(ADMIN, approve.callback_data), /✅ 승인/);
+    // 가입 요청: 단체방에는 승인 버튼 없음, 관리자 1:1 로 알림 → 승인
+    assert.match(await send(606, '/특전대'), /등록되어 있지 않습니다/);
+    await press(606, 'sd:jo:1~606');
+    assert.ok(!calls.some((c) => c.payload.chat_id === GROUP && c.payload.reply_markup), '단체방에 승인 버튼 없음');
+    const note = calls.find((c) => c.method === 'sendMessage' && String(c.payload.chat_id) === String(ADMIN))!;
+    const approve = note.payload.reply_markup.inline_keyboard.flat().find((b: any) => b.text.includes('승인')).callback_data;
+    assert.match(await press(101, approve), /권한이 없습니다/);
+    assert.match(await press(ADMIN, approve), /✅ 승인/);
 });
 
 test('[14] 조직별 데이터 분리', async () => {

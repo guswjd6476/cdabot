@@ -45,6 +45,21 @@ async function show(ctx: Ctx, html: string, buttons?: Buttons) {
 const inPrivate = (ctx: Ctx) => ctx.chat?.type === 'private';
 // 이름·연락처를 지금 이 대화에 보여도 되는지: 개인정보 권한 + 1:1 대화 (단체방에는 항상 가림)
 const piiHere = (ctx: Ctx, a: A) => hasPerm(a, 'pii') && inPrivate(ctx);
+const dmButton = (ctx: Ctx) => {
+    const me = ctx.botInfo?.username;
+    return me ? Markup.inlineKeyboard([[Markup.button.url('1:1 대화 열기', `https://t.me/${me}?start=sd`)]]) : {};
+};
+// 대원 기능은 단체방, 관리자 기능은 1:1 대화에서만 (권한 없는 기능은 장소와 무관하게 ⛔)
+const placeOf = (need: Need) => (need === 'member' ? 'group' : need ? 'private' : 'any');
+const placeOk = (ctx: Ctx, need: Need) => placeOf(need) !== (inPrivate(ctx) ? 'group' : 'private');
+const MSG_GO_GROUP = '👥 대원 기능(활동 시간·결과 제출, 내 현황)은 특전대 단체방에서 사용해주세요.';
+const MSG_GO_DM = '🔒 관리자 기능은 봇과 1:1 대화에서 사용해주세요.';
+async function wrongPlace(ctx: Ctx, need: Need): Promise<boolean> {
+    if (placeOk(ctx, need)) return false;
+    if (inPrivate(ctx)) await ctx.reply(MSG_GO_GROUP);
+    else await ctx.reply(MSG_GO_DM, dmButton(ctx));
+    return true;
+}
 const FLOW_TTL_MS = 30 * 60 * 1000; // 단체방에서 진행 중 입력이 일반 대화를 먹지 않도록 30분 지나면 무시
 
 // 개인정보가 담긴 자료는 요청한 사람의 1:1 대화로만 보냄
@@ -54,11 +69,7 @@ async function sendPrivately(ctx: Ctx, html: string, doc?: { buf: Buffer; filena
         if (doc) await ctx.telegram.sendDocument(ctx.from.id, { source: doc.buf, filename: doc.filename }, { caption: doc.caption });
         if (!inPrivate(ctx)) await ctx.reply('📬 개인정보가 포함되어 있어 1:1 대화로 보냈습니다.');
     } catch {
-        const me = ctx.botInfo?.username;
-        await ctx.reply(
-            '⚠️ 개인정보가 포함된 자료는 1:1 대화로만 보냅니다. 아래 버튼으로 봇과 대화를 먼저 시작한 뒤 다시 눌러주세요.',
-            me ? Markup.inlineKeyboard([[Markup.button.url('1:1 대화 시작', `https://t.me/${me}?start=sd`)]]) : {}
-        );
+        await ctx.reply('⚠️ 개인정보가 포함된 자료는 1:1 대화로만 보냅니다. 아래 버튼으로 봇과 대화를 먼저 시작한 뒤 다시 눌러주세요.', dmButton(ctx));
     }
 }
 
@@ -152,6 +163,7 @@ async function dispatch(ctx: Ctx, sub = '', args = '') {
         if (!a.sysadmin && a.membership?.status !== 'active') return joinScreen(ctx, a);
         return void (await ctx.reply('⛔ 이 기능을 사용할 권한이 없습니다.'));
     }
+    if (await wrongPlace(ctx, action.need)) return;
     await action.run(ctx, a as A, args.trim());
 }
 
@@ -159,7 +171,10 @@ async function menu(ctx: Ctx, a: A) {
     if (!a.sysadmin && a.membership?.status !== 'active') return joinScreen(ctx, a);
     const p = await S.getLatestPeriod(a.org.id);
     const role = a.sysadmin ? '시스템 관리자' : a.membership!.perms.map((x) => PERM_LABEL[x]).join(' · ');
-    const items = Object.entries(ACTIONS).filter(([, x]) => x.label && hasPerm(a, x.need));
+    const items = Object.entries(ACTIONS).filter(([, x]) => x.label && hasPerm(a, x.need) && placeOk(ctx, x.need));
+    // 이 장소에서 못 쓰는 내 기능이 있으면 어디서 쓰는지 안내
+    const elsewhere = Object.values(ACTIONS).some((x) => x.label && hasPerm(a, x.need) && !placeOk(ctx, x.need));
+    const note = !elsewhere ? '' : inPrivate(ctx) ? `\n\n${MSG_GO_GROUP}` : `\n\n${MSG_GO_DM}`;
     const buttons = chunk(
         items.map(([k, x]) => btn(x.label!, `sd:a:${k}`)),
         2
@@ -168,7 +183,8 @@ async function menu(ctx: Ctx, a: A) {
     await show(
         ctx,
         `🪖 <b>${NAME}</b> · ${e(a.org.name)}\n👤 ${e(a.membership?.display_name || ctx.from.first_name)} (${role})\n` +
-            `🗓 취합 주차: ${p ? `${weekLabel(p.week_start)} (${p.status === 'open' ? '제출 받는 중' : '마감'})` : '아직 없음'}`,
+            `🗓 취합 주차: ${p ? `${weekLabel(p.week_start)} (${p.status === 'open' ? '제출 받는 중' : '마감'})` : '아직 없음'}` +
+            note,
         buttons
     );
 }
@@ -207,12 +223,8 @@ async function doJoin(ctx: Ctx, orgId: number) {
     await notifyManagers(ctx.telegram, orgId, MK, `🙋 <b>[${NAME} 가입 요청]</b> ${e(org.name)}\n${e(name)} (ID <code>${ctx.from.id}</code>)`, {
         ...Markup.inlineKeyboard([[btn('✅ 승인', `sd:ap:${orgId}-${m.id}`), btn('❌ 거절', `sd:rj:${orgId}-${m.id}`)]]),
     });
-    await show(
-        ctx,
-        `📨 [${e(org.name)}] ${e(name)} 님 가입 요청을 보냈습니다. 관리자 승인 후 /특전대 로 이용할 수 있습니다.` +
-            (inPrivate(ctx) ? '' : '\n👑 관리자는 아래 버튼으로 승인해주세요.'),
-        inPrivate(ctx) ? undefined : [[btn('✅ 승인 (관리자)', `sd:ap:${orgId}-${m.id}`), btn('❌ 거절', `sd:rj:${orgId}-${m.id}`)]]
-    );
+    // 승인 버튼은 관리자 1:1 대화로만 (notifyManagers). 알림을 못 받은 관리자는 1:1 대화에서 /특전대 승인
+    await show(ctx, `📨 [${e(org.name)}] ${e(name)} 님 가입 요청을 보냈습니다. 관리자 승인 후 /특전대 로 이용할 수 있습니다.`);
 }
 
 // 다른 조직의 요청에 대한 버튼일 수 있으므로 그 조직 기준으로 권한 재확인
@@ -610,6 +622,10 @@ async function resultCb(ctx: Ctx, a: A, s: Record<string, any>, arg: string) {
 async function handleFreeForm(ctx: Ctx, text: string): Promise<boolean> {
     const parsed = R.parseFreeForm(text);
     if (parsed.recognized < 3) return false;
+    if (inPrivate(ctx)) {
+        await ctx.reply('👥 결과는 특전대 단체방에 올려주세요.');
+        return true;
+    }
     const a = await resolveAccess(ctx, MK);
     if (!a.org || !hasPerm(a, 'member')) {
         await ctx.reply('🪖 결과를 제출하려면 먼저 특전대 대원 등록이 필요합니다. /특전대 를 눌러 가입 요청해주세요.');
@@ -1072,7 +1088,7 @@ async function setRetention(ctx: Ctx, a: A, args: string) {
 }
 
 const HELP_MEMBER =
-    `🪖 <b>[${NAME} 사용법]</b> (단체방·1:1 대화 모두 가능 · 개인정보 상세는 1:1로 전송)\n\n` +
+    `🪖 <b>[${NAME} 사용법]</b> (대원: 단체방 · 관리자: 봇과 1:1 대화)\n\n` +
     '• <code>/특전대</code> — 메뉴\n' +
     '• <code>/특전대 제출</code> — 월~금 활동 가능 시간 제출·수정 (예: <code>09:00~12:00, 14:00~17:00</code>)\n' +
     '• <code>/특전대 내현황</code> — 내 요일별·주간 활동 가능 시간과 결과 건수\n' +
@@ -1081,7 +1097,7 @@ const HELP_MEMBER =
     '• 결과 한 번에 보내기: 아래처럼 붙여넣으면 자동 정리\n<code>발: \n이름: \n연락처: \n생년: 20대 중\n성별: \n인도지역: \n인도팀: \n인도자: \n도구: </code>\n' +
     '• 하루 기준 시간 이상이면 충족, 겹치는 시간은 한 번만 계산. 자정을 넘는 구간은 24:00까지만 입력';
 const HELP_MANAGER =
-    '\n\n👑 <b>팀 관리자</b>\n' +
+    '\n\n👑 <b>팀 관리자</b> (봇과 1:1 대화)\n' +
     '• <code>/특전대 시간표 [날짜] [요일]</code> · <code>오늘현황 [날짜]</code> · <code>개인현황 [이름]</code>\n' +
     '• <code>/특전대 결과검색 기간:10.1~10.24 인도지역:서울</code>\n' +
     '• <code>/특전대 미제출</code> · <code>부족시간</code> · <code>마감</code> · <code>재개방 [날짜]</code> · <code>주차시작 [날짜]</code> · <code>수정허용 ID</code>\n' +
@@ -1126,6 +1142,7 @@ export function registerSida(bot: Telegraf<any>) {
             if (op === 'rs') return resultCb(ctx, scoped, s, arg);
             // 관리자 보고서 버튼 — 버튼을 가지고 있어도 매번 서버에서 권한 확인
             if (!hasPerm(a, 'manager') || (op === 'td' && !hasPerm(a, 'pii'))) return void (await ctx.reply('⛔ 권한이 없습니다.'));
+            if (!inPrivate(ctx)) return void (await ctx.reply(MSG_GO_DM, dmButton(ctx)));
             if (op === 'tt' || op === 'tc') {
                 const [pid, w] = arg.split('-').map(Number);
                 const period = await S.getPeriodById(scoped.org.id, pid);
@@ -1153,7 +1170,7 @@ export function registerSida(bot: Telegraf<any>) {
         })
     );
 
-    // 일반 텍스트: 결과 양식 → 진행 중인 입력 → (아니면) 기존 방 보고 처리로
+    // 일반 텍스트: 결과 양식 → 진행 중인 입력 → (아니면) 다음 핸들러로
     bot.on(
         'text',
         run(async (ctx, next) => {
