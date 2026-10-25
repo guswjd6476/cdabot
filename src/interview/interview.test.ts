@@ -63,6 +63,7 @@ test('구분 — 제목에 향수면 향수행사 (안내문의 "당터뷰" 단�
     assert.equal(sheetKind(SHEET), '향수행사'); // 향수 양식 안에 '당터뷰어 필독'이 있어도
     assert.equal(sheetKind('📌 당터뷰 결과\n▪️후속연결O\n#김하나/성북/한솔/향수 좋아함'), '당터뷰'); // 메모 속 '향수'는 무시
     assert.equal(sheetKind('#김하나/성북/한솔'), '당터뷰');
+    assert.equal(sheetKind('📌 당일 인터뷰 양식\n✔️ 향수행사 참석자는 따로\n#김하나/성북/한솔'), '당터뷰'); // 당일 양식 안내에 '향수'가 있어도
     assert.equal(sheetKind('구분: 향수행사\n#김하나/성북/한솔'), '향수행사');
     assert.equal(sheetKind('📌 향수 인터뷰 양식\n구분: 당터뷰\n#김하나/성북/한솔'), '당터뷰');
 });

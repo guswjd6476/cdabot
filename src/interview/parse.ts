@@ -7,14 +7,15 @@ export const FOLLOW_UPS: FollowUp[] = ['O', '보류', 'X'];
 export type InterviewKind = '향수행사' | '당터뷰';
 export const KINDS: InterviewKind[] = ['향수행사', '당터뷰'];
 
-// 구분: '구분: 향수행사' 줄이 있으면 그대로, 없으면 첫 '#' 줄 위(제목·안내)에 '향수'가 있으면 향수행사, 아니면 당터뷰
+// 구분: '구분: 향수행사' 줄이 있으면 그대로, 없으면 첫 '#' 줄 위(제목·안내)에 '당일 인터뷰'면 당터뷰, '향수'가 있으면 향수행사, 둘 다 없으면 당터뷰
 // (향수 양식 안내문에도 '당터뷰'라는 말이 있어서 '향수' 여부로만 판단. 메모 속 단어는 보지 않음)
 export function sheetKind(raw: string): InterviewKind {
     const text = raw.normalize('NFKC');
     const line = text.match(/^\s*(?:구분|종류)\s*[:：]?\s*(.+)$/m)?.[1];
     if (line) return /향수/.test(line) ? '향수행사' : '당터뷰';
     const head = text.split(/^\s*#/m)[0];
-    return /향수/.test(head) ? '향수행사' : '당터뷰';
+    if (/당일\s*인터뷰/.test(head)) return '당터뷰'; // '📌 당일 인터뷰 양식'
+    return /향수/.test(head) ? '향수행사' : '당터뷰'; // '📌 향수 인터뷰 양식'
 }
 
 export interface InterviewEntry {
