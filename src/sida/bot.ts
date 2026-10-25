@@ -714,11 +714,15 @@ async function todayReport(ctx: Ctx, a: A, args: string) {
     await show(ctx, `${html}\n\n<b>6. 당일 항목별 집계</b>\n${resultStats(results)}`, buttons);
 }
 
-// 만남확정 = 2차 만남 일시가 적힌 발굴건 (발굴 건수에 포함, 따로 한 번 더 표시)
-const isMeetConfirmed = (r: S.ResultRow) => r.kind === 'dig' && !!r.meet_at;
+// 답장온 발굴 = 2차 만남 일시가 적힌 발굴건 (더 좋은 결과), 없으면 답장 안온 발굴. 발굴 건수 안에서 나눠 표시
+const isReplied = (r: S.ResultRow) => r.kind === 'dig' && !!r.meet_at;
+function digSplit(rows: S.ResultRow[]) {
+    const dig = rows.filter((r) => r.kind === 'dig');
+    const replied = dig.filter(isReplied).length;
+    return dig.length ? ` (답장온 ${replied} · 답장 안온 ${dig.length - replied})` : '';
+}
 function kindCount(rows: S.ResultRow[]) {
-    const met = rows.filter(isMeetConfirmed).length;
-    return `발 ${rows.filter((r) => r.kind === 'dig').length}건${met ? ` (만남확정 ${met}건)` : ''} · 찾 ${rows.filter((r) => r.kind === 'find').length}건`;
+    return `발 ${rows.filter((r) => r.kind === 'dig').length}건${digSplit(rows)} · 찾 ${rows.filter((r) => r.kind === 'find').length}건`;
 }
 
 // 대원별 '이름: 발 n건 · 찾 n건' (많은 순)
@@ -835,8 +839,7 @@ function resultStats(rows: S.ResultRow[]): string {
     const lines: string[] = [];
     for (const kind of ['dig', 'find'] as R.FormKind[]) {
         const mine = rows.filter((r) => r.kind === kind);
-        const met = mine.filter(isMeetConfirmed).length;
-        lines.push(`<b>${R.FORMS[kind].label}</b> ${mine.length}건${kind === 'dig' ? ` (만남확정 ${met}건)` : ''}`);
+        lines.push(`<b>${R.FORMS[kind].label}</b> ${mine.length}건${kind === 'dig' ? digSplit(mine) : ''}`);
         if (!mine.length) continue;
         for (const k of STAT_FIELDS[kind]) {
             lines.push(
