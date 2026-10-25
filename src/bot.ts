@@ -55,7 +55,7 @@ bot.hears(/^[\/!]역할(?:@\w+)?$/i, async (ctx) => {
         await ctx.reply(`👤 <b>내가 접근 가능한 역할</b>\n${await describeAccess(ctx)}`, { parse_mode: 'HTML' });
     } catch (err: unknown) {
         console.error('[/역할 에러]:', err);
-        await ctx.reply(`⚠️ 조회 중 오류 발생: ${getErrorMessage(err)}`);
+        await ctx.reply('⚠️ 처리 중 오류가 발생했습니다. 잠시 후 다시 시도하고, 계속되면 관리자에게 알려주세요.');
     }
 });
 
@@ -109,7 +109,7 @@ const server = http.createServer(async (req, res) => {
         } catch (err: unknown) {
             console.error(`[${route} 실행 에러]:`, getErrorMessage(err));
             res.writeHead(500, { 'Content-Type': 'text/plain; charset=utf-8' });
-            return res.end(`Failed: ${getErrorMessage(err)}`);
+            return res.end('Failed'); // 자세한 내용은 서버 로그에만
         }
     }
 

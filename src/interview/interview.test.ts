@@ -145,6 +145,9 @@ test('등록 안 된 방에서는 저장 안 함 → 방등록 후 저장, 다�
     const out = await send(201, SHEET, GROUP);
     assert.match(out, /\[향수행사\] 인터뷰 결과 6명 저장 \(새로 6 · 수정 0\)/);
     assert.match(out, /O 3 · 보류 1 · X 2/);
+    // 확인 필요: 인도자 없음(이나래·박다솜), 행정에서 못 찾음(최미르), 동명이인(박다솜) — 후속 X(정보라·홍새봄)는 제외
+    assert.match(out, /확인 필요<\/b> \(후속 X 제외\)\n• 인도자 없음: 이나래, 박다솜\n• 행정에서 못 찾음: 최미르\n• 행정에 같은 이름 여러 명: 박다솜/);
+    assert.doesNotMatch(out, /홍새봄|정보라/);
     assert.match(await send(201, SHEET, GROUP), /새로 0 · 수정 6/);
     assert.equal((await query(`SELECT count(*)::int AS n FROM cdabot_interviews`)).rows[0].n, 6);
 });
@@ -264,6 +267,17 @@ test('구분별로 나눠 보기 — 현황·미등록·찾등합등에 향수/�
     assert.match(r, /없습니다/); // 찾·합한 사람은 모두 향수행사
     r = await send(ADMIN, '/인터뷰 단계 2026.10.20~2026.10.25');
     assert.match(r, /\[구분별\]<\/b>\n• 향수행사: 찾등 1 · 합등 1/);
+});
+
+test('삭제 — 올린 본인·관리자만, 날짜+이름으로', async () => {
+    assert.match(await send(201, '/인터뷰 삭제 윤하람'), /사용법/);
+    assert.match(await send(777, '/인터뷰 삭제 2026.10.20 윤하람'), /권한이 없습니다/);
+    assert.match(await send(201, '/인터뷰 삭제 2026.10.20 윤하람'), /본인이 올린 결과만/); // ADMIN 이 올린 것
+    await send(201, '▪️후속연결O\n#홍새봄봄/성북/양하늘/한솔/오타', GROUP);
+    assert.match(await send(201, '/인터뷰 삭제 오늘 홍새봄봄', GROUP), /\[당터뷰\] 홍새봄봄 인터뷰 기록을 삭제/);
+    assert.match(await send(ADMIN, '/인터뷰 삭제 2026.10.20 윤하람'), /삭제했습니다/); // 관리자는 남의 것도
+    assert.match(await send(ADMIN, '/인터뷰 삭제 2026.10.20 윤하람'), /기록이 없습니다/);
+    assert.equal((await query(`SELECT count(*)::int AS n FROM cdabot_interviews WHERE name IN ('윤하람', '홍새봄봄')`)).rows[0].n, 0);
 });
 
 test('보관기간 지나면 이름·연락처·메모 삭제, 건수는 유지', async () => {

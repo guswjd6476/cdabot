@@ -2,7 +2,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { buildTimetable, dayStatus, mergeSlots, parseRange, parseRanges, parseWeekText, Slot, totalMinutes } from './time';
-import { countBy, missingCount, normalizePhone, parseSlashForms, toCsv, validateField } from './result';
+import { countBy, meetDate, missingCount, normalizePhone, parseSlashForms, toCsv, validateField } from './result';
 
 const h = (s: string) => {
     const r = parseRanges(s);
@@ -160,4 +160,12 @@ test('countBy — 미입력은 따로', () => {
         ['부산', 1],
         ['(미입력)', 1],
     ]);
+});
+
+test('2차 만남 날짜 — 날짜, 내일·요일은 올린 날 기준, 못 읽으면 null', () => {
+    assert.equal(meetDate('내일 19시', '2026-10-24'), '2026-10-25');
+    assert.equal(meetDate('토요일 오후2시', '2026-10-24'), '2026-10-31'); // 10/24 가 토요일 → 다음 주 토요일
+    assert.equal(meetDate('수요일', '2026-10-24'), '2026-10-28');
+    assert.match(meetDate('10.28 19시', '2026-10-24')!, /^\d{4}-10-28$/);
+    assert.equal(meetDate('미정', '2026-10-24'), null);
 });

@@ -529,3 +529,17 @@ test('[15] 봇 재시작 후에도 제출 데이터·진행 중 입력 유지', 
     fs.rmSync(dir, { recursive: true, force: true });
     setQueryable(pgliteQueryable(pg));
 });
+
+test('발굴 답장률·2차 만남 일정 — 관리자만, 이름은 개인정보 권한자만', async () => {
+    assert.match(await send(101, '/특전대 답장률'), /권한이 없습니다/);
+    assert.match(await send(101, '/특전대 만남'), /권한이 없습니다/);
+    const rate = await send(ADMIN, '/특전대 답장률 2000.1.1~2099.12.31');
+    assert.match(rate, /전체: 발굴 \d+ → 답장온 <b>\d+<\/b> \(\d+%\)/);
+    assert.match(rate, /\[대원별\]<\/b>\n• [\s\S]*\[도구별\]<\/b>\n• [\s\S]*\[인도지역별\]<\/b>\n• [\s\S]*\[인도팀별\]/);
+    assert.match(rate, /전단지: 발굴 \d+ → 답장온/);
+
+    const meet = await send(ADMIN, '/특전대 만남 2000.1.1~2099.12.31');
+    assert.match(meet, /2차 만남 일정/);
+    assert.match(meet, /<b>홍길동<\/b> · 10\.28 19시 · 강남역 · 대원 /);
+    assert.match(await send(301, '/특전대 만남 2000.1.1~2099.12.31'), /<b>홍\*동<\/b>[\s\S]*개인정보 권한이 있으면/); // pii 없는 관리자는 가림
+});

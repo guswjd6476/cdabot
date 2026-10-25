@@ -141,6 +141,8 @@ const ACTIONS: Record<string, Action> = {
     오늘현황: { label: '📈 오늘 전체 현황', need: 'manager', run: todayReport },
     개인현황: { label: '👥 개인별 활동 및 결과', need: 'manager', run: personal },
     결과검색: { label: '🔎 결과 검색', need: 'manager', run: search },
+    답장률: { label: '💬 발굴 답장률', need: 'manager', run: replyRate },
+    만남: { label: '🤝 2차 만남 일정', need: 'manager', run: meetings },
     미제출: { label: '⏳ 미제출자 확인', need: 'manager', run: unsubmitted },
     부족시간: { label: '⚠️ 부족 시간 확인', need: 'manager', run: shortage },
     도움말: { label: '❓ 도움말', need: null, run: help },
@@ -854,6 +856,71 @@ function resultStats(rows: S.ResultRow[]): string {
     return lines.join('\n');
 }
 
+// '10.1~10.24' / '10.24' → 기간, 없으면 def
+function argRange(args: string, def: { from: string; to: string }) {
+    const [x, y] = args.split(/[~∼]/).map((v) => parseFlexibleDate(v.trim()));
+    return x ? { from: x, to: y ?? (args.includes('~') ? today() : x) } : def;
+}
+const pctOf = (n: number, d: number) => (d ? Math.round((n / d) * 100) : 0);
+
+// 발굴 답장률: 대원별·도구별·인도지역별·인도팀별 '발굴 n → 답장온 m (x%)' (이름·연락처 없음). 기본 이번 주
+async function replyRate(ctx: Ctx, a: A, args: string) {
+    const { from, to } = argRange(args, { from: weekStartOf(today()), to: today() });
+    const [rows, members] = await Promise.all([S.listResults(a.org.id, { from, to, kind: 'dig' }), listMembers(a.org.id, MK)]);
+    const head = `💬 <b>[발굴 답장률]</b> ${dayjs(from).format('M/D')}~${dayjs(to).format('M/D')}`;
+    if (!rows.length) return show(ctx, `${head}\n\n이 기간에 발굴건이 없습니다.`);
+    const rate = (rs: S.ResultRow[]) => {
+        const m = rs.filter(isReplied).length;
+        return `발굴 ${rs.length} → 답장온 <b>${m}</b> (${pctOf(m, rs.length)}%)`;
+    };
+    const names = new Map(members.map((m) => [m.user_id, m.display_name]));
+    const section = (title: string, keyOf: (r: S.ResultRow) => string | null) => {
+        const by = new Map<string, S.ResultRow[]>();
+        for (const r of rows) {
+            const k = keyOf(r) || '(미입력)';
+            by.set(k, [...(by.get(k) || []), r]);
+        }
+        const lines = [...by.entries()].sort((x, y) => y[1].length - x[1].length).map(([k, rs]) => `• ${e(k)}: ${rate(rs)}`);
+        return `\n\n<b>[${title}]</b>\n${lines.join('\n')}`;
+    };
+    await show(
+        ctx,
+        `${head}\n<i>답장온 = 2차 만남 일시가 적힌 발굴</i>\n\n• 전체: ${rate(rows)}` +
+            section('대원별', (r) => names.get(r.user_id) || r.submitter) +
+            section('도구별', (r) => r.tool) +
+            section('인도지역별', (r) => r.region) +
+            section('인도팀별', (r) => r.team)
+    );
+}
+
+// 2차 만남 일정 (답장온 발굴): 기본 오늘부터 7일, 날짜별. 날짜를 못 읽은 최근 건은 따로
+async function meetings(ctx: Ctx, a: A, args: string) {
+    const { from, to } = argRange(args, { from: today(), to: dayjs(today()).add(6, 'day').format('YYYY-MM-DD') });
+    const rows = (await S.listResults(a.org.id, { kind: 'dig', from: dayjs(from).subtract(60, 'day').format('YYYY-MM-DD') })).filter((r) => r.meet_at);
+    const pii = piiHere(ctx, a);
+    if (pii) await audit(a.org.id, a.userId, 'pii.view', 'meetings', { from, to });
+    const line = (r: S.ResultRow) =>
+        `• <b>${piiCell('name', r.name || '-', !pii)}</b> · ${e(r.meet_at)}${r.meet_place ? ` · ${e(r.meet_place)}` : ''} · 대원 ${e(r.submitter || '-')}${r.guide ? ` · 인도 ${e(r.guide)}` : ''}`;
+    const dated = new Map<string, S.ResultRow[]>();
+    const unknown: S.ResultRow[] = [];
+    for (const r of rows) {
+        const d = R.meetDate(r.meet_at!, r.activity_date);
+        if (d && d >= from && d <= to) dated.set(d, [...(dated.get(d) || []), r]);
+        else if (!d && r.activity_date >= dayjs(today()).subtract(14, 'day').format('YYYY-MM-DD')) unknown.push(r);
+    }
+    const days = [...dated.entries()]
+        .sort((x, y) => x[0].localeCompare(y[0]))
+        .map(([d, rs]) => `<b>${dayjs(d).format('M/D')} (${'일월화수목금토'[dayjs(d).day()]})${d === today() ? ' 오늘' : ''}</b> ${rs.length}건\n${rs.map(line).join('\n')}`);
+    const count = [...dated.values()].reduce((n, rs) => n + rs.length, 0);
+    await show(
+        ctx,
+        `🤝 <b>[2차 만남 일정]</b> ${dayjs(from).format('M/D')}~${dayjs(to).format('M/D')} · ${count}건\n` +
+            (days.length ? `\n${days.join('\n\n')}` : '\n이 기간에 예정된 2차 만남이 없습니다.') +
+            (unknown.length ? `\n\n<b>[날짜를 못 읽은 2차 만남]</b> 최근 2주 ${unknown.length}건\n${unknown.map((r) => `${line(r)} (${dayjs(r.activity_date).format('M/D')} 올림)`).join('\n')}` : '') +
+            (pii ? '' : '\n\n<i>이름은 개인정보 권한이 있으면 보입니다.</i>')
+    );
+}
+
 async function personal(ctx: Ctx, a: A, args: string) {
     const period = (await S.getPeriodByWeek(a.org.id, weekStartOf(today()))) ?? (await S.getLatestPeriod(a.org.id));
     const { members, subs, min } = await loadWeek(a.org.id, period);
@@ -1228,6 +1295,7 @@ const HELP_MANAGER =
     '\n\n👑 <b>팀 관리자</b> (봇과 1:1 대화)\n' +
     '• <code>/특전대 시간표 [날짜] [요일]</code> · <code>오늘현황 [날짜]</code> · <code>개인현황 [이름]</code>\n' +
     '• <code>/특전대 결과검색 기간:10.1~10.24 인도지역:서울</code>\n' +
+    '• <code>/특전대 답장률 [10.1~10.24]</code> — 대원·도구·지역·팀별 발굴 답장률 (기본 이번 주) · <code>만남 [기간]</code> — 2차 만남 일정 (기본 오늘부터 7일)\n' +
     '• <code>/특전대 미제출</code> · <code>부족시간</code> · <code>마감</code> · <code>재개방 [날짜]</code> · <code>주차시작 [날짜]</code> · <code>수정허용 ID</code>\n' +
     '• 단체방에서: <code>/특전대 방등록</code> (그 방 사람은 가입 요청 없이 자동 대원) · <code>방해제</code>\n' +
     '• 현황판 둘 주제(토픽)에서: <code>/특전대 현황판</code> — 결과·활동 시간이 올라올 때마다 그 메시지를 자동 갱신 (끄기: <code>현황판 해제</code>)\n' +
@@ -1269,7 +1337,7 @@ export function registerSida(bot: Telegraf<any>) {
             if (ctx.state.sess?.flow) ctx.state.sess.flow.at = Date.now();
         } catch (err) {
             console.error(`[${NAME} 처리 에러]:`, err);
-            await ctx.reply(`⚠️ 처리 중 오류가 발생했습니다: ${getErrorMessage(err)}`).catch(() => {});
+            await ctx.reply('⚠️ 처리 중 오류가 발생했습니다. 잠시 후 다시 시도하고, 계속되면 관리자에게 알려주세요.').catch(() => {});
         }
     };
 

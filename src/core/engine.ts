@@ -141,7 +141,7 @@ export function registerCore(bot: Telegraf<any>) {
             });
         } catch (err) {
             console.error('[/홈 에러]:', err);
-            await ctx.reply(`⚠️ 오류: ${getErrorMessage(err)}`);
+            await ctx.reply('⚠️ 처리 중 오류가 발생했습니다. 잠시 후 다시 시도하고, 계속되면 관리자에게 알려주세요.');
         }
     });
 
@@ -165,7 +165,7 @@ export function registerCore(bot: Telegraf<any>) {
             });
         } catch (err) {
             console.error('[/조직 에러]:', err);
-            await ctx.reply(`⚠️ 오류: ${getErrorMessage(err)}`);
+            await ctx.reply('⚠️ 처리 중 오류가 발생했습니다. 잠시 후 다시 시도하고, 계속되면 관리자에게 알려주세요.');
         }
     });
 
@@ -185,7 +185,7 @@ export function registerCore(bot: Telegraf<any>) {
             await mod.openMenu(ctx);
         } catch (err) {
             console.error('[core 버튼 에러]:', err);
-            await ctx.reply(`⚠️ 오류: ${getErrorMessage(err)}`);
+            await ctx.reply('⚠️ 처리 중 오류가 발생했습니다. 잠시 후 다시 시도하고, 계속되면 관리자에게 알려주세요.');
         }
     });
 }

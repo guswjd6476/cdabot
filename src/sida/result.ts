@@ -1,3 +1,5 @@
+import { dayjs, parseFlexibleDate } from '../utils';
+
 // 당일 결과 양식 (순수 함수). 외부 AI 없이 '발/…', '찾/…' 한 줄 양식을 '/' 로 나눠 정리하고, 모르는 값은 추측하지 않음
 //   발굴건: 발/이름/연락처/생년(20대초·중·후,30대,모름)/성별/인도지역/인도팀/인도자/도구/+2차만남일시,장소
 //   찾기건: 찾/이름/생년월일/인도지역/인도팀/인도자/목표월
@@ -151,4 +153,19 @@ export function toCsv(header: string[], rows: (string | number | null | undefine
     };
     const body = [header, ...rows].map((r) => r.map(cell).join(',')).join('\r\n');
     return Buffer.from('﻿' + body + '\r\n', 'utf8');
+}
+
+// 2차 만남 날짜: '10.28 19시' 같은 날짜, '내일'·'토요일'은 결과를 올린 날 기준. 못 읽으면 null
+export function meetDate(meetAt: string, activityDate: string): string | null {
+    const base = dayjs(activityDate);
+    const rel = meetAt.match(/오늘|내일|모레/);
+    if (rel) return base.add({ 오늘: 0, 내일: 1, 모레: 2 }[rel[0] as '오늘' | '내일' | '모레'], 'day').format('YYYY-MM-DD');
+    const date = parseFlexibleDate(meetAt);
+    if (date) return date;
+    const wd = meetAt.match(/([월화수목금토일])요일/);
+    if (wd) {
+        const target = '일월화수목금토'.indexOf(wd[1]);
+        return base.add(((target - base.day() + 7) % 7) || 7, 'day').format('YYYY-MM-DD'); // 올린 날 이후 가장 가까운 그 요일
+    }
+    return null;
 }

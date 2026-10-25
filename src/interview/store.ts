@@ -130,6 +130,27 @@ export async function listInterviews(orgId: number, f: InterviewFilter = {}): Pr
     }
 }
 
+// 저장 직후 확인용: 그날 해당 이름들의 행정 연결 상태
+export async function savedStatus(orgId: number, date: string, names: string[]) {
+    return (
+        await query(
+            `SELECT name, follow_up, guides, student_id, match_note FROM cdabot_interviews
+             WHERE org_id = $1 AND interview_date = $2 AND name_key = ANY($3::text[]);`,
+            [orgId, date, names.map(nameKey)]
+        )
+    ).rows as { name: string; follow_up: string | null; guides: string[]; student_id: string | null; match_note: string | null }[];
+}
+
+export async function findInterview(orgId: number, date: string, name: string): Promise<{ id: number; user_id: number; name: string; kind: string } | undefined> {
+    return (
+        await query(`SELECT id, user_id, name, kind FROM cdabot_interviews WHERE org_id = $1 AND interview_date = $2 AND name_key = $3;`, [orgId, date, nameKey(name)])
+    ).rows[0];
+}
+
+export async function deleteInterview(orgId: number, id: number) {
+    await query(`DELETE FROM cdabot_interviews WHERE org_id = $1 AND id = $2;`, [orgId, id]);
+}
+
 // 보관기간이 지난 인터뷰의 이름·연락처·생년월일·메모 삭제 (건수·후속 상태·행정 연결은 통계용으로 유지)
 export async function purgeExpiredInterviews(): Promise<number> {
     let total = 0;

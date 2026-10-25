@@ -3,7 +3,7 @@
 import { Markup, Telegraf } from 'telegraf';
 import { Access, askOrg, hasPerm, Need, registerModule, resolveAccess, session } from '../core/engine';
 import { audit, autoEnroll, getGroupOrg, getMember, Perm, PERMS, setGroupOrg, setSetting, updateMembership, upsertMembership, upsertUser } from '../core/store';
-import { dayjs, escapeHtml as e, getErrorMessage, nowKst, parseFlexibleDate, replyLong } from '../utils';
+import { dayjs, escapeHtml as e, nowKst, parseFlexibleDate, replyLong } from '../utils';
 import { FOLLOW_UPS, InterviewKind, parseInterviewSheet, sheetKind } from './parse';
 import * as S from './store';
 
@@ -39,6 +39,7 @@ const ACTIONS: Record<string, Action> = {
     행정: { label: '📋 행정 등록자 상태', need: 'pii', place: 'private', run: (ctx, a, args) => registered(ctx, a, args) },
     미등록: { label: '⏳ 행정 미등록', need: 'pii', place: 'private', run: (ctx, a, args) => unregistered(ctx, a, args) },
     검색: { need: 'pii', place: 'private', run: (ctx, a, args) => searchName(ctx, a, args) },
+    삭제: { need: null, place: 'any', run: (ctx, a, args) => removeInterview(ctx, a, args) },
     도움말: { label: '❓ 도움말', need: null, place: 'any', run: (ctx) => ctx.reply(HELP, { parse_mode: 'HTML' }) },
     방등록: { need: 'manager', place: 'group', run: registerGroup },
     방해제: { need: 'manager', place: 'group', run: unregisterGroup },
@@ -102,10 +103,22 @@ async function handleSheet(ctx: Ctx, text: string): Promise<boolean> {
     await audit(a.org!.id, a.userId, 'interview.save', ctx.message.message_id, { count: entries.length, date, kind });
     const by = FOLLOW_UPS.map((f) => `${f} ${entries.filter((x) => x.followUp === f).length}`).join(' · ');
     const noStatus = entries.filter((x) => !x.followUp).length;
+    // 확인 필요: 인도자 없음(행정은 지역으로만 찾음), 행정 미연결·동명이인 — 후속 X 는 행정에 없는 게 보통이라 제외
+    const st = r.linkError ? [] : (await S.savedStatus(a.org!.id, date, entries.map((x) => x.name))).filter((x) => x.follow_up !== 'X');
+    const names = (xs: { name: string }[]) => xs.map((x) => e(x.name)).join(', ');
+    const checks = [
+        ['인도자 없음', entries.filter((x) => x.followUp !== 'X' && !x.guides.length)],
+        ['행정에서 못 찾음', st.filter((x) => !x.student_id && x.match_note === 'none')],
+        ['행정에 같은 이름 여러 명', st.filter((x) => x.match_note === 'multi')],
+    ].filter(([, xs]) => xs.length) as [string, { name: string }[]][];
+    const checkText = checks.length
+        ? `\n\n⚠️ <b>확인 필요</b> (후속 X 제외)\n${checks.map(([t, xs]) => `• ${t}: ${names(xs)}`).join('\n')}\n<i>인도자 이름이 행정과 같아야 연결됩니다. 고쳐서 다시 보내면 덮어씁니다.</i>`
+        : '';
     await ctx.reply(
         `🗂 ${md(date)}${date === today() ? '(오늘)' : ''} [${kind}] 인터뷰 결과 ${entries.length}명 저장 (새로 ${r.created} · 수정 ${r.updated})\n후속연결 ${by}${noStatus ? ` · 구분 없음 ${noStatus}` : ''}` +
             `\n<i>구분이 틀리면 맨 위에 "구분: ${kind === '향수행사' ? '당터뷰' : '향수행사'}" 줄을 넣어 다시 보내주세요.</i>` +
             (!dateLine && !group ? '\n💡 지난 날짜 결과면 맨 위에 "날짜: 10.20" 줄을 넣어 다시 보내주세요 (같은 날짜·이름은 덮어씀).' : '') +
+            checkText +
             (r.linkError ? '\n⚠️ 행정 DB를 읽지 못해 행정 연결은 나중에 다시 시도합니다.' : ''),
         { parse_mode: 'HTML' }
     );
@@ -303,6 +316,20 @@ async function stageUps(ctx: Ctx, a: A, rawArgs: string) {
     );
 }
 
+// '/인터뷰 삭제 9.12 왕새문' — 올린 본인 또는 관리자만
+async function removeInterview(ctx: Ctx, a: A, args: string) {
+    const m = args.match(/^(\S+)\s+(.+)$/);
+    const date = m ? parseFlexibleDate(m[1]) : null;
+    if (!m || !date) return void (await ctx.reply('사용법: /인터뷰 삭제 9.12 이름 (인터뷰 날짜와 이름)'));
+    if (!hasPerm(a, 'member') && !hasPerm(a, 'manager')) return void (await ctx.reply('⛔ 이 기능을 사용할 권한이 없습니다.'));
+    const row = await S.findInterview(a.org.id, date, m[2].trim());
+    if (!row) return void (await ctx.reply(`🔎 ${md(date)} "${m[2].trim()}" 인터뷰 기록이 없습니다.`));
+    if (row.user_id !== a.userId && !hasPerm(a, 'manager')) return void (await ctx.reply('⛔ 본인이 올린 결과만 삭제할 수 있습니다. (관리자는 모두 가능)'));
+    await S.deleteInterview(a.org.id, row.id);
+    await audit(a.org.id, a.userId, 'interview.delete', row.id, { date, kind: row.kind });
+    await ctx.reply(`🗑 ${md(date)} [${row.kind}] ${row.name} 인터뷰 기록을 삭제했습니다.`);
+}
+
 /* ====================== 관리 ====================== */
 
 async function registerGroup(ctx: Ctx, a: A) {
@@ -348,7 +375,7 @@ const HELP =
     `• 제목에 '향수'가 있으면 <b>향수행사</b>, 없으면 <b>당터뷰</b>로 구분 (직접 지정: <code>구분: 향수행사</code>)\n` +
     `<code>▪️후속연결O\n#이름/지역/인도자/인터뷰자/메모…</code>\n` +
     `• <code>▪️후속연결O / 보류 / X</code> 아래 줄이 그 상태로 저장\n• 연락처·생년월일(<code>생년월일: 990315</code>)은 메모에서 자동 인식\n` +
-    `• 같은 날 같은 이름을 다시 올리면 덮어씀\n\n` +
+    `• 같은 날 같은 이름을 다시 올리면 덮어씀 · 잘못 올린 사람은 <code>/인터뷰 삭제 9.12 이름</code> (올린 본인·관리자)\n\n` +
     `<b>관리자</b> (봇과 1:1) — 명령 뒤에 <code>향수</code> 또는 <code>당터뷰</code>를 붙이면 그 구분만 (예: <code>/인터뷰 단계 향수 10.1~10.24</code>)\n• <code>/인터뷰 현황 [10.1~10.24]</code> — 인터뷰 수, 행정 등록·단계, 인터뷰자별·지역별\n` +
     `• <code>/인터뷰 행정 [기간]</code> — 행정에 등록된 인터뷰 대상자를 현재 단계별로 (기본 전체, 개인정보 권한)\n` +
     `• <code>/인터뷰 미등록 [기간]</code> — 후속 O·보류인데 행정에 없는 사람 (개인정보 권한)\n• <code>/인터뷰 검색 이름</code> (개인정보 권한)\n` +
@@ -365,7 +392,7 @@ export function registerInterview(bot: Telegraf<any>) {
             await fn(ctx, next);
         } catch (err) {
             console.error(`[${NAME} 처리 에러]:`, err);
-            await ctx.reply(`⚠️ 처리 중 오류가 발생했습니다: ${getErrorMessage(err)}`).catch(() => {});
+            await ctx.reply('⚠️ 처리 중 오류가 발생했습니다. 잠시 후 다시 시도하고, 계속되면 관리자에게 알려주세요.').catch(() => {});
         }
     };
 
