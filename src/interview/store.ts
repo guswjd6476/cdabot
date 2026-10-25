@@ -1,13 +1,14 @@
 // 인터뷰 추적 데이터 + 카운셀링 봇 행정 DB(students·members) 조회. students 는 읽기만 함
 import { query } from '../db';
 import { listModuleSettings } from '../core/store';
-import { FollowUp, InterviewEntry } from './parse';
+import { FollowUp, InterviewEntry, InterviewKind } from './parse';
 
 export const MODULE_KEY = 'interview';
 
 export interface InterviewRow {
     id: number;
     interview_date: string;
+    kind: InterviewKind;
     name: string | null;
     follow_up: FollowUp | null;
     region: string | null;
@@ -19,10 +20,11 @@ export interface InterviewRow {
     student_id: string | null;
     match_note: 'none' | 'multi' | null;
     poster: string | null;
-    last_stage: string | null; // 밤 점검에서 마지막으로 확인한 단계
     // 행정 (students 를 읽을 수 있을 때만)
     stage?: string | null;
     dropped?: boolean;
+    chat_date?: string | null; // 찾_완료일 (찾등)
+    hap_date?: string | null; // 합_완료일 (합등)
 }
 
 // 이름 + 인도자(없으면 지역)로 행정 대상자 찾기 — 카운셀링 봇 /최초등록과 같은 기준. 한 명일 때만 연결
@@ -44,18 +46,18 @@ export async function findStudent(e: { name: string; guides: string[]; region: s
 const nameKey = (n: string) => n.replace(/\s+/g, '');
 
 // 같은 날 같은 이름이면 덮어씀 (행정 연결은 유지). 저장 후 행정 연결 시도
-export async function saveInterviews(orgId: number, userId: number, date: string, entries: InterviewEntry[]) {
+export async function saveInterviews(orgId: number, userId: number, date: string, kind: InterviewKind, entries: InterviewEntry[]) {
     let created = 0;
     for (const x of entries) {
         const res = await query(
-            `INSERT INTO cdabot_interviews (org_id, user_id, interview_date, name, name_key, follow_up, region, guides, interviewer, phone, birth_date, memo)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+            `INSERT INTO cdabot_interviews (org_id, user_id, interview_date, name, name_key, follow_up, region, guides, interviewer, phone, birth_date, memo, kind)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
              ON CONFLICT (org_id, interview_date, name_key) DO UPDATE SET
                  user_id = EXCLUDED.user_id, name = EXCLUDED.name, follow_up = EXCLUDED.follow_up, region = EXCLUDED.region,
                  guides = EXCLUDED.guides, interviewer = EXCLUDED.interviewer, phone = EXCLUDED.phone,
-                 birth_date = EXCLUDED.birth_date, memo = EXCLUDED.memo, updated_at = NOW()
+                 birth_date = EXCLUDED.birth_date, memo = EXCLUDED.memo, kind = EXCLUDED.kind, updated_at = NOW()
              RETURNING (xmax = 0) AS created;`,
-            [orgId, userId, date, x.name, nameKey(x.name), x.followUp, x.region, x.guides, x.interviewer, x.phone, x.birthDate, x.memo]
+            [orgId, userId, date, x.name, nameKey(x.name), x.followUp, x.region, x.guides, x.interviewer, x.phone, x.birthDate, x.memo, kind]
         );
         if (res.rows[0]?.created) created++;
     }
@@ -87,8 +89,8 @@ export async function linkPending(orgId: number): Promise<{ linked: number; erro
 }
 
 const SELECT = `
-    SELECT i.id, i.interview_date::text AS interview_date, i.name, i.follow_up, i.region, i.guides, i.interviewer,
-           i.phone, i.birth_date, i.memo, i.student_id, i.match_note, i.last_stage, mb.display_name AS poster`;
+    SELECT i.id, i.interview_date::text AS interview_date, i.kind, i.name, i.follow_up, i.region, i.guides, i.interviewer,
+           i.phone, i.birth_date, i.memo, i.student_id, i.match_note, mb.display_name AS poster`;
 const FROM = `
     FROM cdabot_interviews i
     LEFT JOIN cdabot_memberships mb ON mb.org_id = i.org_id AND mb.user_id = i.user_id AND mb.module_key = '${MODULE_KEY}'`;
@@ -97,6 +99,7 @@ export interface InterviewFilter {
     from?: string;
     to?: string;
     name?: string;
+    kind?: InterviewKind;
 }
 
 // 행정 단계는 저장하지 않고 볼 때마다 students 에서 읽음 (행정이 바뀌면 바로 반영). 못 읽으면 adminError
@@ -109,23 +112,22 @@ export async function listInterviews(orgId: number, f: InterviewFilter = {}): Pr
     };
     if (f.from) add('i.interview_date >= ?', f.from);
     if (f.to) add('i.interview_date <= ?', f.to);
+    if (f.kind) add('i.kind = ?', f.kind);
     if (f.name) add('i.name ILIKE ?', `%${f.name.replace(/[\\%_]/g, '\\$&')}%`);
     const tail = `WHERE ${where.join(' AND ')} ORDER BY i.interview_date DESC, i.id DESC;`;
     try {
-        const rows = (await query(`${SELECT}, s."단계" AS stage, s."탈락" AS dropped_raw ${FROM} LEFT JOIN students s ON s.id::text = i.student_id ${tail}`, params)).rows;
+        const rows = (
+            await query(
+                `${SELECT}, s."단계" AS stage, s."탈락" AS dropped_raw,
+                        to_char(s."찾_완료일", 'YYYY-MM-DD') AS chat_date, to_char(s."합_완료일", 'YYYY-MM-DD') AS hap_date ${FROM} LEFT JOIN students s ON s.id::text = i.student_id ${tail}`,
+                params
+            )
+        ).rows;
         // 탈락: 탈락 칸에 값이 있거나 단계에 '탈락' (카운셀링 봇과 같은 기준)
         return { rows: rows.map(({ dropped_raw, ...r }) => ({ ...r, dropped: !!dropped_raw || String(r.stage ?? '').includes('탈락') })) };
     } catch (err) {
         return { rows: (await query(`${SELECT} ${FROM} ${tail}`, params)).rows, adminError: err instanceof Error ? err.message : String(err) };
     }
-}
-
-export async function listInterviewOrgs(): Promise<number[]> {
-    return (await query(`SELECT DISTINCT org_id FROM cdabot_interviews;`)).rows.map((r) => r.org_id);
-}
-
-export async function setLastStage(ids: number[], stage: string) {
-    await query(`UPDATE cdabot_interviews SET last_stage = $2 WHERE id = ANY($1::int[]);`, [ids, stage]);
 }
 
 // 보관기간이 지난 인터뷰의 이름·연락처·생년월일·메모 삭제 (건수·후속 상태·행정 연결은 통계용으로 유지)

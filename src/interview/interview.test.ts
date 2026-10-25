@@ -9,7 +9,7 @@ import { registerCore } from '../core/engine';
 import { setSetting } from '../core/store';
 import { registerSida } from '../sida/bot';
 import { registerInterview } from './bot';
-import { parseInterviewSheet } from './parse';
+import { parseInterviewSheet, sheetKind } from './parse';
 import { MODULE_KEY, purgeExpiredInterviews } from './store';
 
 const ADMIN = 9000; // test-setup 의 ADMIN_IDS
@@ -59,6 +59,14 @@ test('결과지 파싱 — 구간별 후속 상태, 칸 수가 다른 줄, 여�
     assert.deepEqual(parseInterviewSheet('오늘 #회의/공지 없음'), []); // '#'로 시작하는 줄만
 });
 
+test('구분 — 제목에 향수면 향수행사 (안내문의 "당터뷰" 단어는 무시), 아니면 당터뷰, "구분:" 줄 우선', () => {
+    assert.equal(sheetKind(SHEET), '향수행사'); // 향수 양식 안에 '당터뷰어 필독'이 있어도
+    assert.equal(sheetKind('📌 당터뷰 결과\n▪️후속연결O\n#김하나/성북/한솔/향수 좋아함'), '당터뷰'); // 메모 속 '향수'는 무시
+    assert.equal(sheetKind('#김하나/성북/한솔'), '당터뷰');
+    assert.equal(sheetKind('구분: 향수행사\n#김하나/성북/한솔'), '향수행사');
+    assert.equal(sheetKind('📌 향수 인터뷰 양식\n구분: 당터뷰\n#김하나/성북/한솔'), '당터뷰');
+});
+
 // 텔레그램 API 가로채기
 let calls: { method: string; payload: any }[] = [];
 (Telegram.prototype as any).callApi = async function (method: string, payload: any) {
@@ -87,7 +95,7 @@ before(async () => {
     // 카운셀링 봇 행정 DB 흉내 (실제 컬럼 이름 그대로)
     await query(`
         CREATE TABLE members ("고유번호" TEXT PRIMARY KEY, "이름" TEXT, "지역" TEXT, "구역" TEXT);
-        CREATE TABLE students (id SERIAL PRIMARY KEY, "이름" TEXT, "단계" TEXT, "인도자_고유번호" TEXT, "교사_고유번호" TEXT, "탈락" DATE);
+        CREATE TABLE students (id SERIAL PRIMARY KEY, "이름" TEXT, "단계" TEXT, "인도자_고유번호" TEXT, "교사_고유번호" TEXT, "탈락" DATE, "찾_완료일" DATE, "합_완료일" DATE);
         INSERT INTO members VALUES ('M1', '양하늘', '성북', '1-1'), ('M2', '최바다', '중랑구', '2-1'), ('M3', '문별', '노원', '3-1'), ('M4', '주서영', '성북', '1-2');
         INSERT INTO students ("이름", "단계", "인도자_고유번호", "탈락") VALUES
             ('김가람', '찾', 'M1', NULL), ('이나래', '합', 'M2', NULL),
@@ -101,7 +109,7 @@ test('등록 안 된 방에서는 저장 안 함 → 방등록 후 저장, 다�
     assert.match(await send(201, '/인터뷰 방등록', GROUP), /권한이 없습니다/);
     assert.match(await send(ADMIN, '/인터뷰 방등록', GROUP), /인터뷰 결과 방으로 등록/);
     const out = await send(201, SHEET, GROUP);
-    assert.match(out, /6명 저장 \(새로 6 · 수정 0\)/);
+    assert.match(out, /\[향수행사\] 인터뷰 결과 6명 저장 \(새로 6 · 수정 0\)/);
     assert.match(out, /O 3 · 보류 1 · X 2/);
     assert.match(await send(201, SHEET, GROUP), /새로 0 · 수정 6/);
     assert.equal((await query(`SELECT count(*)::int AS n FROM cdabot_interviews`)).rows[0].n, 6);
@@ -155,22 +163,51 @@ test('권한 — 올리기만 하는 사람·특전대 관리자는 추적 화�
     assert.match(await send(301, '/특전대 시간표'), /등록되어 있지 않습니다/); // 특전대 권한과 별개
 });
 
-test('/인터뷰 단계 — 요청할 때만, 지난번 확인 이후 바뀐 사람만', async () => {
+test('/인터뷰 단계 — 기간 안에 찾등·합등한 인터뷰 대상자, 인터뷰자별 건수', async () => {
     assert.match(await send(301, '/인터뷰 단계'), /권한이 없습니다/); // 관리자여도 개인정보 권한 필요
     assert.match(await send(ADMIN, '/인터뷰 권한 302 manager,pii 관리자최'), /관리자최/);
-    // 지금 연결된 사람: 김가람 찾 · 이나래 합 · 정보라 탈락 · 최미르 발 → 처음이라 모두 '첫 등록'
-    let out = await send(302, '/인터뷰 단계');
-    assert.match(out, /행정 첫 등록 4명/);
-    assert.equal(calls.filter((c) => c.method === 'sendMessage').length, 1); // 요청한 사람에게만 답
-    assert.match(await send(302, '/인터뷰 단계'), /바뀐 사람이 없습니다/);
+    assert.match(await send(302, '/인터뷰 단계'), /찾등 <b>0명<\/b> · 합등 <b>0명<\/b>[\s\S]*없습니다/);
 
-    await query(`UPDATE students SET "단계" = '합' WHERE "이름" = '김가람'`);
-    await query(`UPDATE students SET "탈락" = '2026-10-20' WHERE "이름" = '이나래'`);
-    out = await send(ADMIN, '/인터뷰 단계');
-    assert.match(out, /단계 향상 1명<\/b>\n• <b>김가람<\/b> 찾 → <b>합<\/b> <i>\(인터뷰 \d+\/\d+ · 성북 · 인도 양하늘,강구름 · 인터뷰 한솔\)/);
-    assert.match(out, /탈락 1명<\/b>\n• <b>이나래<\/b> 합 → <b>탈락<\/b>/);
-    assert.match(out, /최근 30일 인터뷰 6명 중 행정 등록 4명/);
-    assert.doesNotMatch(out, /정보라|최미르/);
+    await query(`UPDATE students SET "찾_완료일" = '2026-10-05', "합_완료일" = '2026-10-21' WHERE "이름" = '김가람'`);
+    await query(`UPDATE students SET "찾_완료일" = '2026-10-22' WHERE "이름" = '이나래'`);
+    await query(`UPDATE students SET "찾_완료일" = '2026-09-01' WHERE "이름" = '정보라'`); // 기간 밖
+    const out = await send(302, '/인터뷰 단계 2026.10.20~2026.10.25');
+    assert.match(out, /찾등·합등<\/b> 10\/20~10\/25/);
+    assert.match(out, /찾등 <b>1명<\/b> · 합등 <b>1명<\/b>/);
+    assert.match(out, /\[찾등 1명\]<\/b>\n• 10\/22 <b>이나래<\/b> \[향수행사\] <i>\(인터뷰 \d+\/\d+ · 중랑 · 인터뷰 한솔\)/);
+    assert.match(out, /\[합등 1명\]<\/b>\n• 10\/21 <b>김가람<\/b> \[향수행사\] <i>\(인터뷰 \d+\/\d+ · 성북 · 인도 양하늘,강구름 · 인터뷰 한솔\)/);
+    assert.match(out, /한솔: 찾등 1 · 합등 1/);
+    assert.doesNotMatch(out, /정보라/);
+    assert.equal(calls.filter((c) => c.method === 'sendMessage').length, 1); // 요청한 사람에게만
+});
+
+test('밀린 결과 — 1:1로 "날짜:" 줄과 함께 보내면 그 날짜로 저장, 미래·권한 없음은 저장 안 함', async () => {
+    const back = '날짜: 2026.10.20\n▪️후속연결O\n#윤하람/성북/양하늘/한솔/메모';
+    assert.doesNotMatch(await send(777, back), /저장/); // 인터뷰 권한 없는 사람
+    assert.match(await send(ADMIN, back), /10\/20 \[당터뷰\] 인터뷰 결과 1명 저장 \(새로 1 · 수정 0\)/);
+    assert.equal((await query(`SELECT interview_date::text AS d FROM cdabot_interviews WHERE name = '윤하람'`)).rows[0].d, '2026-10-20');
+    assert.match(await send(ADMIN, back), /새로 0 · 수정 1/); // 다시 보내면 덮어씀
+    assert.match(await send(ADMIN, '날짜: 2099.1.1\n#윤하람/성북/양하늘/한솔'), /날짜를 확인해주세요[\s\S]*저장하지 않았습니다/);
+    assert.match(await send(ADMIN, '날짜: 언젠가\n#윤하람/성북/양하늘/한솔'), /날짜를 확인해주세요/);
+    assert.match(await send(302, '#서다온/노원/문별/한솔'), /\(오늘\) \[당터뷰\] 인터뷰 결과 1명 저장[\s\S]*날짜: 10\.20/); // 날짜 없으면 오늘 + 안내
+});
+
+test('구분별로 나눠 보기 — 현황·미등록·찾등합등에 향수/당터뷰를 붙이면 그 구분만', async () => {
+    // 지금까지: 향수행사 6명(SHEET) + 당터뷰 2명(윤하람 10/20, 서다온 오늘)
+    let r = await send(ADMIN, '/인터뷰 현황 2026.10.1~2026.12.31');
+    assert.match(r, /\[구분별\]<\/b>\n• 향수행사: 6명[^\n]*\n• 당터뷰: 2명/);
+    r = await send(ADMIN, '/인터뷰 현황 당터뷰 2026.10.1~2026.12.31');
+    assert.match(r, /인터뷰·행정 현황 \[당터뷰\]<\/b>[\s\S]*인터뷰 <b>2명<\/b>/);
+    assert.doesNotMatch(r, /\[구분별\]/);
+    r = await send(ADMIN, '/인터뷰 미등록 향수 2026.10.1~2026.12.31');
+    assert.match(r, /행정 미등록 \[향수행사\]/);
+    assert.match(r, /박다솜<\/b> \[향수행사\]/);
+    assert.doesNotMatch(r, /서다온|윤하람/);
+    r = await send(ADMIN, '/인터뷰 단계 당터뷰 2026.10.20~2026.10.25');
+    assert.match(r, /찾등·합등 \[당터뷰\]/);
+    assert.match(r, /없습니다/); // 찾·합한 사람은 모두 향수행사
+    r = await send(ADMIN, '/인터뷰 단계 2026.10.20~2026.10.25');
+    assert.match(r, /\[구분별\]<\/b>\n• 향수행사: 찾등 1 · 합등 1/);
 });
 
 test('보관기간 지나면 이름·연락처·메모 삭제, 건수는 유지', async () => {

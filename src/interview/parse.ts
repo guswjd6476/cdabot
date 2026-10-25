@@ -4,6 +4,19 @@
 export type FollowUp = 'O' | '보류' | 'X';
 export const FOLLOW_UPS: FollowUp[] = ['O', '보류', 'X'];
 
+export type InterviewKind = '향수행사' | '당터뷰';
+export const KINDS: InterviewKind[] = ['향수행사', '당터뷰'];
+
+// 구분: '구분: 향수행사' 줄이 있으면 그대로, 없으면 첫 '#' 줄 위(제목·안내)에 '향수'가 있으면 향수행사, 아니면 당터뷰
+// (향수 양식 안내문에도 '당터뷰'라는 말이 있어서 '향수' 여부로만 판단. 메모 속 단어는 보지 않음)
+export function sheetKind(raw: string): InterviewKind {
+    const text = raw.normalize('NFKC');
+    const line = text.match(/^\s*(?:구분|종류)\s*[:：]?\s*(.+)$/m)?.[1];
+    if (line) return /향수/.test(line) ? '향수행사' : '당터뷰';
+    const head = text.split(/^\s*#/m)[0];
+    return /향수/.test(head) ? '향수행사' : '당터뷰';
+}
+
 export interface InterviewEntry {
     name: string;
     followUp: FollowUp | null; // 구간 제목 전에 나온 줄은 null

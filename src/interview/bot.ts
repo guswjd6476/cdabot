@@ -4,7 +4,7 @@ import { Markup, Telegraf } from 'telegraf';
 import { Access, askOrg, hasPerm, Need, registerModule, resolveAccess, session } from '../core/engine';
 import { audit, autoEnroll, getGroupOrg, getMember, Perm, PERMS, setGroupOrg, setSetting, updateMembership, upsertMembership, upsertUser } from '../core/store';
 import { dayjs, escapeHtml as e, getErrorMessage, nowKst, parseFlexibleDate, replyLong } from '../utils';
-import { FOLLOW_UPS, parseInterviewSheet } from './parse';
+import { FOLLOW_UPS, InterviewKind, KINDS, parseInterviewSheet, sheetKind } from './parse';
 import * as S from './store';
 
 const NAME = '인터뷰';
@@ -35,7 +35,7 @@ type Place = 'group' | 'private' | 'any';
 type Action = { label?: string; need: Need; place: Place; run: (ctx: Ctx, a: A, args: string) => Promise<unknown> };
 const ACTIONS: Record<string, Action> = {
     현황: { label: '📊 인터뷰·행정 현황', need: 'manager', place: 'private', run: (ctx, a, args) => report(ctx, a, args) },
-    단계: { label: '📈 행정 단계 변화', need: 'pii', place: 'private', run: (ctx, a) => stageChanges(ctx, a) },
+    단계: { label: '📈 찾등·합등', need: 'pii', place: 'private', run: (ctx, a, args) => stageUps(ctx, a, args) },
     미등록: { label: '⏳ 행정 미등록', need: 'pii', place: 'private', run: (ctx, a, args) => unregistered(ctx, a, args) },
     검색: { need: 'pii', place: 'private', run: (ctx, a, args) => searchName(ctx, a, args) },
     도움말: { label: '❓ 도움말', need: null, place: 'any', run: (ctx) => ctx.reply(HELP, { parse_mode: 'HTML' }) },
@@ -73,28 +73,53 @@ async function menu(ctx: Ctx, a: A) {
 
 /* ====================== 결과지 저장 ====================== */
 
-// 등록된 인터뷰 방에 '#이름/…' 줄이 있는 메시지 → 저장. 아니면 false (다른 핸들러로)
+// 등록된 인터뷰 방 또는 봇과 1:1 대화에 '#이름/…' 줄이 있는 메시지 → 저장. 아니면 false (다른 핸들러로)
+// '날짜: 10.20' 줄이 있으면 그 날짜로 (밀린 결과 입력), 없으면 오늘
 async function handleSheet(ctx: Ctx, text: string): Promise<boolean> {
-    if (inPrivate(ctx) || !(await getGroupOrg(ctx.chat.id, MK))) return false;
+    const group = !inPrivate(ctx);
+    if (group && !(await getGroupOrg(ctx.chat.id, MK))) return false;
     const entries = parseInterviewSheet(text);
     if (!entries.length) return false;
     const a = await access(ctx);
-    if (!a.org || !hasPerm(a, 'member')) {
+    const canPost = !!a.org && (hasPerm(a, 'member') || hasPerm(a, 'manager'));
+    if (!group && !canPost) {
+        if (!a.org && a.orgChoices.length > 1) return askOrg(ctx, MK, a).then(() => true);
+        return false; // 인터뷰 권한 없는 사람의 1:1 대화는 다른 기능으로
+    }
+    if (!canPost) {
         await ctx.reply('🚫 결과를 저장할 수 없는 계정입니다. 관리자에게 문의해주세요.');
         return true;
     }
-    const r = await S.saveInterviews(a.org.id, a.userId, today(), entries);
-    await audit(a.org.id, a.userId, 'interview.save', ctx.message.message_id, { count: entries.length });
+    const dateLine = text.normalize('NFKC').match(/^\s*(?:날짜|인터뷰일|일자)\s*[:：]?\s*(.+)$/m);
+    const date = dateLine ? parseFlexibleDate(dateLine[1]) : today();
+    if (!date || date > today()) {
+        await ctx.reply(`⚠️ 날짜를 확인해주세요: "${dateLine?.[1].trim()}" (예: 날짜: 10.20 — 오늘 이후 날짜는 안 됨). 저장하지 않았습니다.`);
+        return true;
+    }
+    const kind = sheetKind(text);
+    const r = await S.saveInterviews(a.org!.id, a.userId, date, kind, entries);
+    await audit(a.org!.id, a.userId, 'interview.save', ctx.message.message_id, { count: entries.length, date, kind });
     const by = FOLLOW_UPS.map((f) => `${f} ${entries.filter((x) => x.followUp === f).length}`).join(' · ');
     const noStatus = entries.filter((x) => !x.followUp).length;
     await ctx.reply(
-        `🗂 인터뷰 결과 ${entries.length}명 저장 (새로 ${r.created} · 수정 ${r.updated})\n후속연결 ${by}${noStatus ? ` · 구분 없음 ${noStatus}` : ''}` +
-            (r.linkError ? '\n⚠️ 행정 DB를 읽지 못해 행정 연결은 나중에 다시 시도합니다.' : '')
+        `🗂 ${md(date)}${date === today() ? '(오늘)' : ''} [${kind}] 인터뷰 결과 ${entries.length}명 저장 (새로 ${r.created} · 수정 ${r.updated})\n후속연결 ${by}${noStatus ? ` · 구분 없음 ${noStatus}` : ''}` +
+            `\n<i>구분이 틀리면 맨 위에 "구분: ${kind === '향수행사' ? '당터뷰' : '향수행사'}" 줄을 넣어 다시 보내주세요.</i>` +
+            (!dateLine && !group ? '\n💡 지난 날짜 결과면 맨 위에 "날짜: 10.20" 줄을 넣어 다시 보내주세요 (같은 날짜·이름은 덮어씀).' : '') +
+            (r.linkError ? '\n⚠️ 행정 DB를 읽지 못해 행정 연결은 나중에 다시 시도합니다.' : ''),
+        { parse_mode: 'HTML' }
     );
     return true;
 }
 
 /* ====================== 추적 화면 (관리자 1:1) ====================== */
+
+// 인자에 '향수' 또는 '당터뷰'가 있으면 그 구분만. 나머지는 기간
+function kindArg(args: string): { kind?: InterviewKind; rest: string } {
+    const m = args.match(/향수(?:행사)?|당터뷰?/);
+    if (!m) return { rest: args };
+    return { kind: m[0].startsWith('향수') ? '향수행사' : '당터뷰', rest: args.replace(m[0], ' ').trim() };
+}
+const kindTitle = (k?: InterviewKind) => (k ? ` [${k}]` : '');
 
 // '10.1~10.24' / '10.24' / 없으면 최근 days일
 function range(args: string, days: number) {
@@ -137,19 +162,21 @@ function groupLines(rows: S.InterviewRow[], keyOf: (r: S.InterviewRow) => string
         .join('\n');
 }
 
-async function report(ctx: Ctx, a: A, args: string) {
+async function report(ctx: Ctx, a: A, rawArgs: string) {
+    const { kind, rest: args } = kindArg(rawArgs);
     const { from, to } = range(args, 30);
-    const { rows, adminError } = await load(a, { from, to });
-    if (!rows.length) return void (await ctx.reply(`📊 ${md(from)}~${md(to)} 인터뷰 결과가 없습니다.`));
+    const { rows, adminError } = await load(a, { from, to, kind });
+    if (!rows.length) return void (await ctx.reply(`📊 ${md(from)}~${md(to)}${kindTitle(kind)} 인터뷰 결과가 없습니다.`));
     const linked = rows.filter((r) => r.student_id);
     const waiting = rows.filter((r) => !r.student_id && r.follow_up !== 'X');
     const fu = FOLLOW_UPS.map((f) => `${f} ${rows.filter((r) => r.follow_up === f).length}`).join(' · ');
-    let html = `📊 <b>인터뷰·행정 현황</b> ${md(from)}~${md(to)}\n\n• 인터뷰 <b>${rows.length}명</b> — 후속연결 ${fu}\n`;
+    let html = `📊 <b>인터뷰·행정 현황${kindTitle(kind)}</b> ${md(from)}~${md(to)}\n\n• 인터뷰 <b>${rows.length}명</b> — 후속연결 ${fu}\n`;
     if (adminError) html += `\n${ADMIN_WARN}\n`;
     else {
         html += `• 행정 등록 <b>${linked.length}명</b>${pct(linked.length, rows.length)}${linked.length ? ` — ${stageCounts(linked)}` : ''}\n`;
         html += `• 행정 미등록 (후속 X 제외) ${waiting.length}명${waiting.some((r) => r.match_note === 'multi') ? ` · 동명이인 확인 필요 ${waiting.filter((r) => r.match_note === 'multi').length}명` : ''}\n`;
     }
+    if (!kind) html += `\n<b>[구분별]</b>\n${groupLines(rows, (r) => r.kind, !adminError)}\n`;
     html += `\n<b>[인터뷰자별]</b>\n${groupLines(rows, (r) => r.interviewer, !adminError)}\n\n<b>[지역별]</b>\n${groupLines(rows, (r) => r.region, !adminError)}`;
     const kb = hasPerm(a, 'pii') && waiting.length ? Markup.inlineKeyboard([[btn('⏳ 미등록 명단', `iv:a:미등록`)]]) : {};
     await replyLong(ctx, html, kb);
@@ -158,22 +185,23 @@ async function report(ctx: Ctx, a: A, args: string) {
 const who = (r: S.InterviewRow) =>
     [r.region, r.guides.length ? `인도 ${r.guides.join(',')}` : null, r.interviewer ? `인터뷰 ${r.interviewer}` : null].filter(Boolean).map((x) => e(x)).join(' · ');
 
-async function unregistered(ctx: Ctx, a: A, args: string) {
+async function unregistered(ctx: Ctx, a: A, rawArgs: string) {
+    const { kind, rest: args } = kindArg(rawArgs);
     const { from, to } = range(args, 60);
-    const { rows, adminError } = await load(a, { from, to });
+    const { rows, adminError } = await load(a, { from, to, kind });
     if (adminError) return void (await ctx.reply(ADMIN_WARN));
     const list = rows.filter((r) => !r.student_id && r.name && r.follow_up !== 'X').reverse(); // 오래된 것부터
     await audit(a.org.id, a.userId, 'interview.pii_view', 'unregistered', { count: list.length });
-    if (!list.length) return void (await ctx.reply(`✅ ${md(from)}~${md(to)} 후속연결 O·보류 중 행정 미등록자가 없습니다.`));
+    if (!list.length) return void (await ctx.reply(`✅ ${md(from)}~${md(to)}${kindTitle(kind)} 후속연결 O·보류 중 행정 미등록자가 없습니다.`));
     const days = (d: string) => dayjs(today()).diff(dayjs(d), 'day');
     const lines = list.map(
         (r) =>
-            `• ${md(r.interview_date)} <b>${e(r.name)}</b> [후속${e(r.follow_up ?? '?')}] ${who(r)} · ${days(r.interview_date)}일째` +
+            `• ${md(r.interview_date)} <b>${e(r.name)}</b> [${r.kind}] [후속${e(r.follow_up ?? '?')}] ${who(r)} · ${days(r.interview_date)}일째` +
             (r.match_note === 'multi' ? ' · ⚠️ 행정에 같은 이름 여러 명' : '')
     );
     await replyLong(
         ctx,
-        `⏳ <b>행정 미등록</b> ${md(from)}~${md(to)} · ${list.length}명 (후속 X 제외, 개인정보 — 외부 공유 금지)\n` +
+        `⏳ <b>행정 미등록${kindTitle(kind)}</b> ${md(from)}~${md(to)} · ${list.length}명 (후속 X 제외, 개인정보 — 외부 공유 금지)\n` +
             `<i>행정에서 이름 + 인도자(인도자가 없으면 지역)로 찾습니다. 등록되면 다음 조회부터 빠집니다.</i>\n\n${lines.join('\n')}`
     );
 }
@@ -187,7 +215,7 @@ async function searchName(ctx: Ctx, a: A, args: string) {
         adminError ? '행정: 확인 불가' : r.student_id ? `행정: <b>${e(r.dropped ? '탈락' : r.stage || '등록')}</b>` : r.match_note === 'multi' ? '행정: 같은 이름 여러 명 (확인 필요)' : '행정: 미등록';
     const blocks = rows.slice(0, 20).map(
         (r) =>
-            `<b>${e(r.name)}</b> · ${r.interview_date} · 후속${e(r.follow_up ?? '?')} · ${admin(r)}\n${who(r)}` +
+            `<b>${e(r.name)}</b> · ${r.interview_date} [${r.kind}] · 후속${e(r.follow_up ?? '?')} · ${admin(r)}\n${who(r)}` +
             (r.phone ? `\n📞 ${e(r.phone)}` : '') +
             (r.birth_date ? ` · 🎂 ${e(r.birth_date)}` : '') +
             (r.poster ? ` · 올린 사람 ${e(r.poster)}` : '') +
@@ -196,38 +224,53 @@ async function searchName(ctx: Ctx, a: A, args: string) {
     await replyLong(ctx, `🔎 <b>"${e(args)}"</b> ${rows.length}건${rows.length > 20 ? ' (최근 20건만)' : ''} — 개인정보, 외부 공유 금지\n\n${blocks.join('\n\n')}`);
 }
 
-/* ====================== 행정 단계 변화 (요청할 때만) ====================== */
+/* ====================== 찾등·합등 (단계 향상) ====================== */
 
-// 인터뷰 대상자 중 지난번 확인 이후 행정 단계가 바뀐 사람 (첫 등록·향상·탈락·변경). 확인한 단계는 저장해 다음 확인의 기준이 됨
-async function stageChanges(ctx: Ctx, a: A) {
-    const { rows, adminError } = await load(a, { from: nowKst().subtract(180, 'day').format('YYYY-MM-DD') });
+// 기간 안에 행정에서 찾등·합등(찾_완료일·합_완료일)한 인터뷰 대상자. 기간 없으면 이번 주(월~오늘)
+const UPS = [
+    { key: 'chat_date', label: '찾등' },
+    { key: 'hap_date', label: '합등' },
+] as const;
+
+async function stageUps(ctx: Ctx, a: A, rawArgs: string) {
+    const { kind, rest: args } = kindArg(rawArgs);
+    const ws = nowKst().subtract((nowKst().day() + 6) % 7, 'day').format('YYYY-MM-DD');
+    const { from, to } = args ? range(args, 7) : { from: ws, to: today() };
+    const { rows, adminError } = await load(a, { kind }); // 인터뷰가 오래전이어도 이 기간에 단계가 오른 사람은 포함
     if (adminError) return void (await ctx.reply(ADMIN_WARN));
-    // 같은 사람을 여러 번 인터뷰했으면 한 번만 (rows 는 최근 인터뷰부터)
-    const byStudent = new Map<string, S.InterviewRow[]>();
-    for (const r of rows) if (r.student_id) byStudent.set(r.student_id, [...(byStudent.get(r.student_id) || []), r]);
-    const groups: Record<'first' | 'up' | 'drop' | 'other', string[]> = { first: [], up: [], drop: [], other: [] };
-    for (const rs of byStudent.values()) {
-        const r = rs[0];
-        const now = stageOf(r);
-        const prev = rs.find((x) => x.last_stage)?.last_stage ?? null;
-        if (now === prev) continue;
-        const kind = !prev ? 'first' : now === '탈락' ? 'drop' : stageRank(now) > stageRank(prev) ? 'up' : 'other';
-        const info = [`인터뷰 ${md(r.interview_date)}`, who(r)].filter(Boolean).join(' · ');
-        groups[kind].push(`• <b>${e(r.name ?? '(이름 삭제됨)')}</b> ${prev ? `${e(prev)} → ` : ''}<b>${e(now)}</b> <i>(${info})</i>`);
-        await S.setLastStage(rs.map((x) => x.id), now);
-    }
-    const count = Object.values(groups).reduce((n, g) => n + g.length, 0);
-    await audit(a.org.id, a.userId, 'interview.pii_view', 'stage', { count });
-    const sec = (title: string, g: string[]) => (g.length ? `\n<b>${title} ${g.length}명</b>\n${g.join('\n')}\n` : '');
-    const recent = rows.filter((r) => r.interview_date >= nowKst().subtract(29, 'day').format('YYYY-MM-DD'));
-    const recentLinked = recent.filter((r) => r.student_id);
+    const seen = new Set<string>();
+    const people = rows.filter((r) => r.student_id && !seen.has(r.student_id) && seen.add(r.student_id)); // 같은 사람 여러 번 인터뷰 → 최근 1건
+    const inRange = (d?: string | null) => !!d && d >= from && d <= to;
+    await audit(a.org.id, a.userId, 'interview.pii_view', 'stage_ups', { from, to });
+    const sections = UPS.map(({ key, label }) => {
+        const hit = people.filter((r) => inRange(r[key])).sort((x, y) => x[key]!.localeCompare(y[key]!));
+        const lines = hit.map(
+            (r) =>
+                `• ${md(r[key]!)} <b>${e(r.name ?? '(이름 삭제됨)')}</b> [${r.kind}]${r.dropped ? ' <i>(현재 탈락)</i>' : ''} <i>(인터뷰 ${md(r.interview_date)}${who(r) ? ` · ${who(r)}` : ''})</i>`
+        );
+        return { label, hit, text: hit.length ? `\n<b>[${label} ${hit.length}명]</b>\n${lines.join('\n')}\n` : '' };
+    });
+    const total = sections.reduce((n, x) => n + x.hit.length, 0);
+    // 구분별·인터뷰자별 찾등·합등 건수
+    const tally = (keyOf: (r: S.InterviewRow) => string | null) => {
+        const m = new Map<string, Record<string, number>>();
+        for (const x of sections)
+            for (const r of x.hit) {
+                const k = keyOf(r) || '(미입력)';
+                const c = m.get(k) ?? {};
+                c[x.label] = (c[x.label] || 0) + 1;
+                m.set(k, c);
+            }
+        return [...m.entries()].map(([k, c]) => `• ${e(k)}: ${UPS.map((u) => `${u.label} ${c[u.label] || 0}`).join(' · ')}`).join('\n');
+    };
     await replyLong(
         ctx,
-        `📈 <b>인터뷰 대상자 행정 단계 변화</b> (지난번 확인 이후)\n` +
-            (count ? sec('단계 향상', groups.up) + sec('행정 첫 등록', groups.first) + sec('탈락', groups.drop) + sec('단계 변경', groups.other) : '\n바뀐 사람이 없습니다.\n') +
-            `\n최근 30일 인터뷰 ${recent.length}명 중 행정 등록 ${recentLinked.length}명${pct(recentLinked.length, recent.length)}` +
-            (recentLinked.length ? ` — ${stageCounts(recentLinked)}` : '') +
-            `\n<i>개인정보 포함 — 외부 공유 금지</i>`
+        `📈 <b>인터뷰 대상자 찾등·합등${kindTitle(kind)}</b> ${md(from)}~${md(to)}\n\n` +
+            `• ${sections.map((x) => `${x.label} <b>${x.hit.length}명</b>`).join(' · ')}\n` +
+            (total
+                ? sections.map((x) => x.text).join('') + (kind ? '' : `\n<b>[구분별]</b>\n${tally((r) => r.kind)}\n`) + `\n<b>[인터뷰자별]</b>\n${tally((r) => r.interviewer)}\n`
+                : '\n이 기간에 찾등·합등한 인터뷰 대상자가 없습니다.\n') +
+            `\n<i>행정 DB의 찾·합 완료일 기준 · 개인정보 포함 — 외부 공유 금지</i>`
     );
 }
 
@@ -271,14 +314,16 @@ async function setRetention(ctx: Ctx, a: A, args: string) {
 
 const HELP =
     `🎙 <b>[인터뷰 추적 사용법]</b>\n\n` +
-    `<b>결과 올리기</b> (등록된 인터뷰 방)\n지금 쓰는 결과지 그대로 올리면 사람별로 저장됩니다.\n` +
+    `<b>결과 올리기</b> (등록된 인터뷰 방 또는 봇과 1:1)\n지금 쓰는 결과지 그대로 올리면 사람별로 저장됩니다.\n` +
+    `• 밀린 결과는 맨 위에 <code>날짜: 10.20</code> 줄을 넣어 봇에게 1:1로 보내면 그 날짜로 저장\n` +
+    `• 제목에 '향수'가 있으면 <b>향수행사</b>, 없으면 <b>당터뷰</b>로 구분 (직접 지정: <code>구분: 향수행사</code>)\n` +
     `<code>▪️후속연결O\n#이름/지역/인도자/인터뷰자/메모…</code>\n` +
     `• <code>▪️후속연결O / 보류 / X</code> 아래 줄이 그 상태로 저장\n• 연락처·생년월일(<code>생년월일: 990315</code>)은 메모에서 자동 인식\n` +
     `• 같은 날 같은 이름을 다시 올리면 덮어씀\n\n` +
-    `<b>관리자</b> (봇과 1:1)\n• <code>/인터뷰 현황 [10.1~10.24]</code> — 인터뷰 수, 행정 등록·단계, 인터뷰자별·지역별\n` +
+    `<b>관리자</b> (봇과 1:1) — 명령 뒤에 <code>향수</code> 또는 <code>당터뷰</code>를 붙이면 그 구분만 (예: <code>/인터뷰 단계 향수 10.1~10.24</code>)\n• <code>/인터뷰 현황 [10.1~10.24]</code> — 인터뷰 수, 행정 등록·단계, 인터뷰자별·지역별\n` +
     `• <code>/인터뷰 미등록 [기간]</code> — 후속 O·보류인데 행정에 없는 사람 (개인정보 권한)\n• <code>/인터뷰 검색 이름</code> (개인정보 권한)\n` +
     `• 단체방에서 <code>/인터뷰 방등록</code> · <code>방해제</code>\n` +
-    `• <code>/인터뷰 단계</code> — 지난번 확인 이후 행정 단계가 바뀐 사람 (첫 등록·향상·탈락, 개인정보 권한)\n\n` +
+    `• <code>/인터뷰 단계 [10.1~10.24]</code> — 그 기간에 찾등·합등한 인터뷰 대상자 (기본 이번 주, 개인정보 권한)\n\n` +
     `<b>시스템 관리자</b>: <code>/인터뷰 권한 ID manager,pii [이름]</code> · <code>/인터뷰 보관기간 365</code>\n\n` +
     `행정 등록은 카운셀링 봇 행정 DB에서 <b>이름 + 인도자</b>(인도자가 없으면 지역)로 찾습니다. 같은 이름이 여러 명이면 연결하지 않고 '확인 필요'로 둡니다.`;
 
