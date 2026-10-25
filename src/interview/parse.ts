@@ -32,8 +32,10 @@ export interface InterviewEntry {
 const EMPTY = /^[-–—]$/;
 // 사람 이름 칸: '홍길동' 또는 '양이슬, 김준수' 또는 '-'
 const PEOPLE = /^([가-힣]{2,4}(\s*,\s*[가-힣]{2,4})*|[-–—])$/;
-// shortcut: 지역은 '-' 이거나 사람 이름(3~4자) 모양이 아니면 지역으로 봄 — 3글자 지역명이 생기면 지역 목록으로 판별
 const NAME_ONLY = /^[가-힣]{3,4}(\s*,\s*[가-힣]{2,4})*$/;
+const NOT_NAME = /^(새신자|기신자|재신자)$/; // 지역 칸에 오는 구분 (이름 모양이지만 사람 아님)
+// '#' 없이 쓴 사람 줄: 이름(함00 같은 표기 포함)으로 시작하고 '/' 2개 이상
+const PLAIN_ENTRY = /^[가-힣]{1,4}[0-9○]{0,2}\s*\/[^/]*\//;
 
 function followUpOf(line: string): FollowUp | undefined {
     if (!/후속\s*연결/.test(line)) return undefined;
@@ -66,9 +68,10 @@ export function parseInterviewSheet(raw: string): InterviewEntry[] {
         if (f) {
             flush();
             followUp = f;
-        } else if (/^#[가-힣A-Za-z0-9]/.test(t) && t.includes('/')) {
+        } else if ((/^#[가-힣A-Za-z0-9]/.test(t) && t.includes('/')) || (followUp && PLAIN_ENTRY.test(t))) {
+            // '#이름/…' 줄, 또는 후속연결 제목 아래의 '이름/…/…' 줄 (위쪽 양식 안내 '섭외자/지역/…'는 제목 전이라 제외)
             flush();
-            cur = { head: t.slice(1), more: [], followUp };
+            cur = { head: t.replace(/^#/, ''), more: [], followUp };
         } else if (/^▪|^✔|^📌/.test(t)) {
             flush(); // 다른 제목 줄 → 앞 사람 메모 끝
         } else if (cur && t) {
@@ -84,7 +87,12 @@ function toEntry(head: string, more: string[], followUp: FollowUp | null): Inter
     const name = parts[0].slice(0, 30);
     let i = 1;
     let region: string | null = null;
-    if (parts.length > 1 && !NAME_ONLY.test(parts[1])) {
+    // 지역 칸 생략 판단: 둘째 칸이 이름 모양이고 이름 칸이 2개 이하로 이어지면 생략된 것 (인도자·인터뷰자는 최대 2칸)
+    // shortcut: 지역 생략 + 메모가 '추후연락' 같은 2~4글자면 지역으로 잘못 봄 — 잦으면 지역 목록으로 판별
+    let run = 1;
+    while (run < parts.length && PEOPLE.test(parts[run])) run++;
+    const regionOmitted = parts.length > 1 && NAME_ONLY.test(parts[1]) && !NOT_NAME.test(parts[1]) && run - 1 <= 2;
+    if (parts.length > 1 && !regionOmitted) {
         region = EMPTY.test(parts[1]) ? null : parts[1].slice(0, 30);
         i = 2;
     }
