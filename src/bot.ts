@@ -1,12 +1,15 @@
 import dotenv from 'dotenv';
 dotenv.config();
 
+import crypto from 'crypto';
 import http from 'http';
 import { Telegraf } from 'telegraf';
 import { runMigrations } from './db';
 import { getErrorMessage } from './utils';
 import { describeAccess, isSysadmin, registerCore } from './core/engine';
 import { registerSida } from './sida/bot';
+import { registerInterview } from './interview/bot';
+import { purgeExpiredInterviews } from './interview/store';
 import { purgeExpiredPii } from './sida/store';
 
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
@@ -32,6 +35,7 @@ bot.hears(/^[\/!](start|help|도움말)(?:@\w+)?$/i, async (ctx) => {
         '📌 <b>[시다봇 안내]</b>\n\n' +
             '• <code>/특전대</code> — 특전대 메뉴 (활동 시간 제출, 결과 제출, 현황)\n' +
             '• <code>/특전대 도움말</code> — 특전대 사용법\n' +
+            '• <code>/인터뷰</code> — 인터뷰 결과·행정 등록 추적\n' +
             '• <code>/홈</code> · <code>/역할</code> — 내가 쓸 수 있는 역할\n' +
             '• <code>/내아이디</code> — 내 텔레그램 ID (대원 등록·관리자 설정용)',
         { parse_mode: 'HTML' }
@@ -57,6 +61,8 @@ bot.hears(/^[\/!]역할(?:@\w+)?$/i, async (ctx) => {
 
 // 특전대 모듈 (/특전대 명령, 버튼, 입력 흐름)
 registerSida(bot);
+// 인터뷰 추적 모듈 (/인터뷰 — 특전대와 별개)
+registerInterview(bot);
 
 /* =====================================================
  * ⏰ 크론 (외부 크론 서비스가 HTTP로 호출)
@@ -65,12 +71,16 @@ async function nightJob() {
     // 보관기간(/특전대 보관기간)이 지난 결과의 이름·연락처 삭제
     const purged = await purgeExpiredPii();
     if (purged) console.log(`🗂 [개인정보 보관기간 만료] ${purged}건 이름·연락처 삭제`);
+    const purgedIv = await purgeExpiredInterviews();
+    if (purgedIv) console.log(`🗂 [인터뷰 개인정보 보관기간 만료] ${purgedIv}건 삭제`);
 }
 
 /* =====================================================
  * 🌐 HTTP 서버 (웹훅 + 크론)
  * ===================================================== */
 const ALLOWED_UPDATES = ['message', 'callback_query'] as const;
+// 웹훅 위조 방지: 텔레그램이 보내는 헤더 비밀값 (토큰에서 파생 — 별도 설정 불필요)
+const WEBHOOK_SECRET = crypto.createHash('sha256').update(BOT_TOKEN).digest('hex');
 
 const server = http.createServer(async (req, res) => {
     const url = new URL(req.url || '/', `http://${req.headers.host}`);
@@ -78,7 +88,7 @@ const server = http.createServer(async (req, res) => {
     // alwaysdata 처럼 경로를 붙여 배포해도 동작하도록 (예: /cdabot/webhook, /cdabot/cron-10pm)
     const route = '/' + (url.pathname.split('/').filter(Boolean).pop() || '');
     if (req.method === 'POST' && route === '/webhook') {
-        return bot.webhookCallback(url.pathname)(req, res);
+        return bot.webhookCallback(url.pathname, { secretToken: WEBHOOK_SECRET })(req, res);
     }
 
     const cronJobs: Record<string, () => Promise<void>> = {
@@ -121,7 +131,7 @@ server.listen(PORT, async () => {
 
     if (WEBHOOK_URL) {
         try {
-            await bot.telegram.setWebhook(WEBHOOK_URL, { allowed_updates: [...ALLOWED_UPDATES] });
+            await bot.telegram.setWebhook(WEBHOOK_URL, { allowed_updates: [...ALLOWED_UPDATES], secret_token: WEBHOOK_SECRET });
             console.log(`Telegram Webhook 등록 완료: ${WEBHOOK_URL}`);
         } catch (e: unknown) {
             console.error('Webhook 등록 에러:', getErrorMessage(e));
