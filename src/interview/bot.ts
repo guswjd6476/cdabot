@@ -4,7 +4,7 @@ import { Markup, Telegraf } from 'telegraf';
 import { Access, askOrg, hasPerm, Need, registerModule, resolveAccess, session } from '../core/engine';
 import { audit, autoEnroll, getGroupOrg, getMember, Perm, PERMS, setGroupOrg, setSetting, updateMembership, upsertMembership, upsertUser } from '../core/store';
 import { dayjs, escapeHtml as e, getErrorMessage, nowKst, parseFlexibleDate, replyLong } from '../utils';
-import { FOLLOW_UPS, InterviewKind, KINDS, parseInterviewSheet, sheetKind } from './parse';
+import { FOLLOW_UPS, InterviewKind, parseInterviewSheet, sheetKind } from './parse';
 import * as S from './store';
 
 const NAME = '인터뷰';
@@ -35,7 +35,7 @@ type Place = 'group' | 'private' | 'any';
 type Action = { label?: string; need: Need; place: Place; run: (ctx: Ctx, a: A, args: string) => Promise<unknown> };
 const ACTIONS: Record<string, Action> = {
     현황: { label: '📊 인터뷰·행정 현황', need: 'manager', place: 'private', run: (ctx, a, args) => report(ctx, a, args) },
-    단계: { label: '📈 찾등·합등', need: 'pii', place: 'private', run: (ctx, a, args) => stageUps(ctx, a, args) },
+    단계: { label: '📈 찾등·합등 (전체)', need: 'pii', place: 'private', run: (ctx, a, args) => stageUps(ctx, a, args) },
     미등록: { label: '⏳ 행정 미등록', need: 'pii', place: 'private', run: (ctx, a, args) => unregistered(ctx, a, args) },
     검색: { need: 'pii', place: 'private', run: (ctx, a, args) => searchName(ctx, a, args) },
     도움말: { label: '❓ 도움말', need: null, place: 'any', run: (ctx) => ctx.reply(HELP, { parse_mode: 'HTML' }) },
@@ -226,51 +226,53 @@ async function searchName(ctx: Ctx, a: A, args: string) {
 
 /* ====================== 찾등·합등 (단계 향상) ====================== */
 
-// 기간 안에 행정에서 찾등·합등(찾_완료일·합_완료일)한 인터뷰 대상자. 기간 없으면 이번 주(월~오늘)
-const UPS = [
-    { key: 'chat_date', label: '찾등' },
-    { key: 'hap_date', label: '합등' },
-] as const;
-
+// 인터뷰 대상자 중 행정에서 찾등·합등이 된 사람. 기본은 전체 기간, 기간을 적으면 그 기간에 완료된 사람만
+//   완료일(찾_완료일·합_완료일)이 있거나, 비어 있어도 현재 단계가 그 이상(예: 섭)이면 된 것으로 봄 (기간을 적으면 완료일 기준만)
+//   합등한 사람은 찾등 명단에 다시 넣지 않음
 async function stageUps(ctx: Ctx, a: A, rawArgs: string) {
     const { kind, rest: args } = kindArg(rawArgs);
-    const ws = nowKst().subtract((nowKst().day() + 6) % 7, 'day').format('YYYY-MM-DD');
-    const { from, to } = args ? range(args, 7) : { from: ws, to: today() };
-    const { rows, adminError } = await load(a, { kind }); // 인터뷰가 오래전이어도 이 기간에 단계가 오른 사람은 포함
+    const period = args ? range(args, 7) : null;
+    const { rows, adminError } = await load(a, { kind });
     if (adminError) return void (await ctx.reply(ADMIN_WARN));
     const seen = new Set<string>();
     const people = rows.filter((r) => r.student_id && !seen.has(r.student_id) && seen.add(r.student_id)); // 같은 사람 여러 번 인터뷰 → 최근 1건
-    const inRange = (d?: string | null) => !!d && d >= from && d <= to;
-    await audit(a.org.id, a.userId, 'interview.pii_view', 'stage_ups', { from, to });
-    const sections = UPS.map(({ key, label }) => {
-        const hit = people.filter((r) => inRange(r[key])).sort((x, y) => x[key]!.localeCompare(y[key]!));
-        const lines = hit.map(
-            (r) =>
-                `• ${md(r[key]!)} <b>${e(r.name ?? '(이름 삭제됨)')}</b> [${r.kind}]${r.dropped ? ' <i>(현재 탈락)</i>' : ''} <i>(인터뷰 ${md(r.interview_date)}${who(r) ? ` · ${who(r)}` : ''})</i>`
-        );
-        return { label, hit, text: hit.length ? `\n<b>[${label} ${hit.length}명]</b>\n${lines.join('\n')}\n` : '' };
-    });
-    const total = sections.reduce((n, x) => n + x.hit.length, 0);
-    // 구분별·인터뷰자별 찾등·합등 건수
+    const rankOf = (r: S.InterviewRow) => STAGE_ORDER.indexOf(String(r.stage ?? '').trim().charAt(0));
+    const reached = (r: S.InterviewRow, key: 'chat_date' | 'hap_date', stage: string) =>
+        period ? !!r[key] && r[key]! >= period.from && r[key]! <= period.to : !!r[key] || rankOf(r) >= STAGE_ORDER.indexOf(stage);
+    const hap = people.filter((r) => reached(r, 'hap_date', '합'));
+    const chat = people.filter((r) => reached(r, 'chat_date', '찾'));
+    const chatOnly = chat.filter((r) => !hap.includes(r));
+    await audit(a.org.id, a.userId, 'interview.pii_view', 'stage_ups', { period, kind });
+
+    const byDate = (key: 'chat_date' | 'hap_date') => (x: S.InterviewRow, y: S.InterviewRow) => (y[key] ?? '').localeCompare(x[key] ?? ''); // 최근 완료부터, 날짜 없으면 끝
+    const line = (r: S.InterviewRow, key: 'chat_date' | 'hap_date') =>
+        `• ${r[key] ? md(r[key]!) : '날짜 없음'} <b>${e(r.name ?? '(이름 삭제됨)')}</b> [${r.kind}] 현재 ${e(stageOf(r))} <i>(인터뷰 ${md(r.interview_date)}${who(r) ? ` · ${who(r)}` : ''})</i>`;
+    const section = (title: string, list: S.InterviewRow[], key: 'chat_date' | 'hap_date') =>
+        list.length ? `\n<b>[${title} ${list.length}명]</b>\n${[...list].sort(byDate(key)).map((r) => line(r, key)).join('\n')}\n` : '';
+    // 구분별·인터뷰자별 건수
     const tally = (keyOf: (r: S.InterviewRow) => string | null) => {
-        const m = new Map<string, Record<string, number>>();
-        for (const x of sections)
-            for (const r of x.hit) {
-                const k = keyOf(r) || '(미입력)';
-                const c = m.get(k) ?? {};
-                c[x.label] = (c[x.label] || 0) + 1;
-                m.set(k, c);
-            }
-        return [...m.entries()].map(([k, c]) => `• ${e(k)}: ${UPS.map((u) => `${u.label} ${c[u.label] || 0}`).join(' · ')}`).join('\n');
+        const m = new Map<string, { chat: number; hap: number }>();
+        for (const r of chat.concat(hap.filter((x) => !chat.includes(x)))) {
+            const k = keyOf(r) || '(미입력)';
+            const c = m.get(k) ?? { chat: 0, hap: 0 };
+            if (chat.includes(r)) c.chat++;
+            if (hap.includes(r)) c.hap++;
+            m.set(k, c);
+        }
+        return [...m.entries()].sort((x, y) => y[1].chat - x[1].chat).map(([k, c]) => `• ${e(k)}: 찾등 ${c.chat} · 합등 ${c.hap}`).join('\n');
     };
+    const total = chat.length + hap.length;
     await replyLong(
         ctx,
-        `📈 <b>인터뷰 대상자 찾등·합등${kindTitle(kind)}</b> ${md(from)}~${md(to)}\n\n` +
-            `• ${sections.map((x) => `${x.label} <b>${x.hit.length}명</b>`).join(' · ')}\n` +
+        `📈 <b>인터뷰 대상자 찾등·합등${kindTitle(kind)}</b> ${period ? `${md(period.from)}~${md(period.to)}` : '전체 기간'}\n\n` +
+            `• 행정 연결 ${people.length}명 중 찾등 <b>${chat.length}명</b> · 합등 <b>${hap.length}명</b>\n` +
             (total
-                ? sections.map((x) => x.text).join('') + (kind ? '' : `\n<b>[구분별]</b>\n${tally((r) => r.kind)}\n`) + `\n<b>[인터뷰자별]</b>\n${tally((r) => r.interviewer)}\n`
-                : '\n이 기간에 찾등·합등한 인터뷰 대상자가 없습니다.\n') +
-            `\n<i>행정 DB의 찾·합 완료일 기준 · 개인정보 포함 — 외부 공유 금지</i>`
+                ? section('합등', hap, 'hap_date') +
+                  section('찾등 (합등 전)', chatOnly, 'chat_date') +
+                  (kind ? '' : `\n<b>[구분별]</b>\n${tally((r) => r.kind)}\n`) +
+                  `\n<b>[인터뷰자별]</b>\n${tally((r) => r.interviewer)}\n`
+                : `\n${period ? '이 기간에 ' : ''}찾등·합등한 인터뷰 대상자가 없습니다.\n`) +
+            `\n<i>행정 DB 기준 (날짜 = 찾·합 완료일) · 개인정보 포함 — 외부 공유 금지</i>`
     );
 }
 
@@ -323,7 +325,7 @@ const HELP =
     `<b>관리자</b> (봇과 1:1) — 명령 뒤에 <code>향수</code> 또는 <code>당터뷰</code>를 붙이면 그 구분만 (예: <code>/인터뷰 단계 향수 10.1~10.24</code>)\n• <code>/인터뷰 현황 [10.1~10.24]</code> — 인터뷰 수, 행정 등록·단계, 인터뷰자별·지역별\n` +
     `• <code>/인터뷰 미등록 [기간]</code> — 후속 O·보류인데 행정에 없는 사람 (개인정보 권한)\n• <code>/인터뷰 검색 이름</code> (개인정보 권한)\n` +
     `• 단체방에서 <code>/인터뷰 방등록</code> · <code>방해제</code>\n` +
-    `• <code>/인터뷰 단계 [10.1~10.24]</code> — 그 기간에 찾등·합등한 인터뷰 대상자 (기본 이번 주, 개인정보 권한)\n\n` +
+    `• <code>/인터뷰 단계 [10.1~10.24]</code> — 찾등·합등한 인터뷰 대상자 (기본 전체 기간, 기간을 적으면 그 기간 완료자만, 개인정보 권한)\n\n` +
     `<b>시스템 관리자</b>: <code>/인터뷰 권한 ID manager,pii [이름]</code> · <code>/인터뷰 보관기간 365</code>\n\n` +
     `행정 등록은 카운셀링 봇 행정 DB에서 <b>이름 + 인도자</b>(인도자가 없으면 지역)로 찾습니다. 같은 이름이 여러 명이면 연결하지 않고 '확인 필요'로 둡니다.`;
 
