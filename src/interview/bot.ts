@@ -36,6 +36,7 @@ type Action = { label?: string; need: Need; place: Place; run: (ctx: Ctx, a: A, 
 const ACTIONS: Record<string, Action> = {
     현황: { label: '📊 인터뷰·행정 현황', need: 'manager', place: 'private', run: (ctx, a, args) => report(ctx, a, args) },
     단계: { label: '📈 찾등·합등 (전체)', need: 'pii', place: 'private', run: (ctx, a, args) => stageUps(ctx, a, args) },
+    행정: { label: '📋 행정 등록자 상태', need: 'pii', place: 'private', run: (ctx, a, args) => registered(ctx, a, args) },
     미등록: { label: '⏳ 행정 미등록', need: 'pii', place: 'private', run: (ctx, a, args) => unregistered(ctx, a, args) },
     검색: { need: 'pii', place: 'private', run: (ctx, a, args) => searchName(ctx, a, args) },
     도움말: { label: '❓ 도움말', need: null, place: 'any', run: (ctx) => ctx.reply(HELP, { parse_mode: 'HTML' }) },
@@ -178,7 +179,9 @@ async function report(ctx: Ctx, a: A, rawArgs: string) {
     }
     if (!kind) html += `\n<b>[구분별]</b>\n${groupLines(rows, (r) => r.kind, !adminError)}\n`;
     html += `\n<b>[인터뷰자별]</b>\n${groupLines(rows, (r) => r.interviewer, !adminError)}\n\n<b>[지역별]</b>\n${groupLines(rows, (r) => r.region, !adminError)}`;
-    const kb = hasPerm(a, 'pii') && waiting.length ? Markup.inlineKeyboard([[btn('⏳ 미등록 명단', `iv:a:미등록`)]]) : {};
+    const kb = hasPerm(a, 'pii')
+        ? Markup.inlineKeyboard([[...(linked.length ? [btn('📋 행정 등록자 상태', 'iv:a:행정')] : []), ...(waiting.length ? [btn('⏳ 미등록 명단', 'iv:a:미등록')] : [])]])
+        : {};
     await replyLong(ctx, html, kb);
 }
 
@@ -203,6 +206,30 @@ async function unregistered(ctx: Ctx, a: A, rawArgs: string) {
         ctx,
         `⏳ <b>행정 미등록${kindTitle(kind)}</b> ${md(from)}~${md(to)} · ${list.length}명 (후속 X 제외, 개인정보 — 외부 공유 금지)\n` +
             `<i>행정에서 이름 + 인도자(인도자가 없으면 지역)로 찾습니다. 등록되면 다음 조회부터 빠집니다.</i>\n\n${lines.join('\n')}`
+    );
+}
+
+// 행정에 등록된 인터뷰 대상자를 현재 단계별로 (높은 단계부터, 탈락은 맨 아래). 기본 전체 기간, 기간은 인터뷰 날짜 기준
+async function registered(ctx: Ctx, a: A, rawArgs: string) {
+    const { kind, rest: args } = kindArg(rawArgs);
+    const period = args ? range(args, 30) : null;
+    const { rows, adminError } = await load(a, { kind, ...(period ?? {}) });
+    if (adminError) return void (await ctx.reply(ADMIN_WARN));
+    const seen = new Set<string>();
+    const people = rows.filter((r) => r.student_id && !seen.has(r.student_id) && seen.add(r.student_id)); // 같은 사람 여러 번 인터뷰 → 최근 1건
+    await audit(a.org.id, a.userId, 'interview.pii_view', 'registered', { count: people.length, kind, period });
+    const title = `📋 <b>행정 등록자 상태${kindTitle(kind)}</b> ${period ? `인터뷰 ${md(period.from)}~${md(period.to)}` : '전체 기간'}`;
+    if (!people.length) return void (await replyLong(ctx, `${title}\n\n행정에 등록된 인터뷰 대상자가 없습니다.`));
+    const groups = new Map<string, S.InterviewRow[]>();
+    for (const r of people) groups.set(stageOf(r), [...(groups.get(stageOf(r)) || []), r]);
+    const order = [...groups.keys()].sort((x, y) => (x === '탈락' ? 1 : y === '탈락' ? -1 : stageRank(y) - stageRank(x)));
+    const blocks = order.map((st) => {
+        const lines = groups.get(st)!.map((r) => `• <b>${e(r.name ?? '(이름 삭제됨)')}</b> [${r.kind}] <i>(인터뷰 ${md(r.interview_date)}${who(r) ? ` · ${who(r)}` : ''})</i>`);
+        return `<b>[${e(st)} ${lines.length}명]</b>\n${lines.join('\n')}`;
+    });
+    await replyLong(
+        ctx,
+        `${title}\n\n• 행정 등록 <b>${people.length}명</b> — ${stageCounts(people)}\n\n${blocks.join('\n\n')}\n\n<i>행정 DB의 현재 단계 · 개인정보 포함 — 외부 공유 금지</i>`
     );
 }
 
@@ -323,6 +350,7 @@ const HELP =
     `• <code>▪️후속연결O / 보류 / X</code> 아래 줄이 그 상태로 저장\n• 연락처·생년월일(<code>생년월일: 990315</code>)은 메모에서 자동 인식\n` +
     `• 같은 날 같은 이름을 다시 올리면 덮어씀\n\n` +
     `<b>관리자</b> (봇과 1:1) — 명령 뒤에 <code>향수</code> 또는 <code>당터뷰</code>를 붙이면 그 구분만 (예: <code>/인터뷰 단계 향수 10.1~10.24</code>)\n• <code>/인터뷰 현황 [10.1~10.24]</code> — 인터뷰 수, 행정 등록·단계, 인터뷰자별·지역별\n` +
+    `• <code>/인터뷰 행정 [기간]</code> — 행정에 등록된 인터뷰 대상자를 현재 단계별로 (기본 전체, 개인정보 권한)\n` +
     `• <code>/인터뷰 미등록 [기간]</code> — 후속 O·보류인데 행정에 없는 사람 (개인정보 권한)\n• <code>/인터뷰 검색 이름</code> (개인정보 권한)\n` +
     `• 단체방에서 <code>/인터뷰 방등록</code> · <code>방해제</code>\n` +
     `• <code>/인터뷰 단계 [10.1~10.24]</code> — 찾등·합등한 인터뷰 대상자 (기본 전체 기간, 기간을 적으면 그 기간 완료자만, 개인정보 권한)\n\n` +

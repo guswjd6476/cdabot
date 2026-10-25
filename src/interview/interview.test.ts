@@ -89,6 +89,8 @@ async function send(from: number, text: string, chatId = from) {
     return calls.filter((c) => c.method === 'sendMessage').map((c) => c.payload.text).join('\n---\n');
 }
 
+const labelsOf = (_: string) => calls.flatMap((c) => c.payload?.reply_markup?.inline_keyboard?.flat().map((b: any) => b.text) ?? []);
+
 before(async () => {
     setQueryable(pgliteQueryable(new PGlite()));
     await runMigrations();
@@ -190,6 +192,17 @@ test('/인터뷰 단계 — 기본 전체 기간에서 찾등·합등 (완료일
     assert.match(out, /\[합등 1명\]<\/b>\n• 10\/21 <b>김가람<\/b>/);
     assert.match(out, /\[찾등 \(합등 전\) 1명\]<\/b>\n• 10\/22 <b>이나래<\/b>/);
     assert.doesNotMatch(out, /정보라/);
+});
+
+test('/인터뷰 행정 — 행정 등록자를 현재 단계별로 (높은 단계부터, 탈락은 맨 아래)', async () => {
+    assert.match(await send(301, '/인터뷰 행정'), /권한이 없습니다/); // 개인정보 권한 필요
+    const out = await send(302, '/인터뷰 행정');
+    assert.match(out, /행정 등록자 상태<\/b> 전체 기간/);
+    assert.match(out, /행정 등록 <b>4명<\/b> — 발 1 · 찾 1 · 합 1 · 탈락 1/);
+    assert.match(out, /\[합 1명\]<\/b>\n• <b>이나래<\/b>[\s\S]*\[찾 1명\]<\/b>\n• <b>김가람<\/b> \[향수행사\] <i>\(인터뷰 \d+\/\d+ · 성북[\s\S]*\[발 1명\]<\/b>\n• <b>최미르<\/b>[\s\S]*\[탈락 1명\]<\/b>\n• <b>정보라<\/b>/);
+    assert.doesNotMatch(out, /박다솜|홍새봄/); // 행정 미연결은 제외
+    assert.match(await send(302, '/인터뷰 행정 당터뷰'), /행정에 등록된 인터뷰 대상자가 없습니다/);
+    assert.ok(labelsOf(await send(302, '/인터뷰 현황')).includes('📋 행정 등록자 상태'));
 });
 
 test('밀린 결과 — 1:1로 "날짜:" 줄과 함께 보내면 그 날짜로 저장, 미래·권한 없음은 저장 안 함', async () => {
