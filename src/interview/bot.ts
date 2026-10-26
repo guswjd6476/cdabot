@@ -140,7 +140,7 @@ async function handleSheet(ctx: Ctx, text: string): Promise<boolean> {
 
 const KIND_CODE: Record<InterviewKind, string> = { 향수행사: 'h', 당터뷰: 'd' };
 const kindOfCode = (c: string): InterviewKind | undefined => (c === 'h' ? '향수행사' : c === 'd' ? '당터뷰' : undefined);
-const SIDA_MK = 'sida';
+const SIDA_MK = SS.MODULE_KEY; // 특전대 대원 모듈 ('special')
 
 // 특전대 기간: 관리자가 만든 특전대 주차(월~일) 안의 날짜일 때만 등록 기능을 켬
 const inSidaWeek = async (orgId: number, date: string) =>

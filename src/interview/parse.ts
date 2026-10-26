@@ -43,8 +43,10 @@ const PLAIN_ENTRY = /^[가-힣]{1,4}[0-9○]{0,2}\s*\/[^/]*\//;
 function followUpOf(line: string): FollowUp | undefined {
     if (!/후속\s*연결/.test(line)) return undefined;
     if (/보류/.test(line)) return '보류';
-    if (/후속\s*연결\s*[Xx×✕✖]/.test(line)) return 'X';
-    if (/후속\s*연결\s*[Oo○⭕0]/.test(line)) return 'O';
+    // '후속연결O', '후속 연결: o', '후속연결 (O)', '후속연결 - ⭕', '후속연결 ✅' 모두
+    const mark = line.match(/후속\s*연결\s*(?:여부)?\s*[:：\-–(\[]?\s*(\S)/)?.[1];
+    if (mark && /[Xx×✕✖❌]/.test(mark)) return 'X';
+    if (mark && /[Oo○⭕0✅]/.test(mark)) return 'O';
     return undefined;
 }
 

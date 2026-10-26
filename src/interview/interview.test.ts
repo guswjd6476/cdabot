@@ -336,7 +336,7 @@ test('특전대 양식으로 바꾸기 — 모두 발굴, 후속 O 는 찾기도
 
 test('/인터뷰 특전대 — 특전대 주차면 결과지 올릴 때 자동 등록(현황판 반영), 인도자와 같은 이름 대원 실적, 두 번 등록 안 됨', async () => {
     const u = await upsertUser(4242, '양하늘');
-    await upsertMembership(1, u.id, 'sida', '양하늘', 'active');
+    await upsertMembership(1, u.id, 'special', '양하늘', 'active');
     const sheet = `날짜: 2026.10.2\n구분: 향수행사\n▪️후속연결O\n#이가온/성북/양하늘/손바람/10.30(금),노원/07.10.12, 010-1234-0001\n▪️후속연결X\n#김건모/노원/문별/황금새/남 22살`;
     assert.doesNotMatch(await send(ADMIN, sheet), /특전대/); // 특전대 주차가 없으면 등록 안 함
     assert.match(await send(ADMIN, '/인터뷰 특전대 2026.10.2'), /특전대 기간\(주차\)이 아닌/);
@@ -354,7 +354,7 @@ test('/인터뷰 특전대 — 특전대 주차면 결과지 올릴 때 자동 �
 
     // 수동: 미리보기 → 등록 (대원 이름을 맞춘 뒤 빠진 사람 넣기)
     const u2 = await upsertUser(4343, '문별');
-    await upsertMembership(1, u2.id, 'sida', '문별', 'active');
+    await upsertMembership(1, u2.id, 'special', '문별', 'active');
     const pv = await send(ADMIN, '/인터뷰 특전대 2026.10.2');
     assert.match(pv, /발굴 1건 · 찾기 0건 · 이미 등록 2건 제외/);
     assert.match(pv, /발\/김건모\/\/20대 초\/남\/노원\/3\/문별\/당터뷰\n  → 대원 문별/);
@@ -371,4 +371,11 @@ test('보관기간 지나면 이름·연락처·메모 삭제, 건수는 유지'
     const row = (await query(`SELECT name, phone, memo, student_id FROM cdabot_interviews WHERE pii_purged_at IS NOT NULL`)).rows[0];
     assert.deepEqual([row.name, row.phone, row.memo], [null, null, null]);
     assert.ok(row.student_id, '행정 연결은 유지');
+});
+
+test('후속연결 제목 — 띄어쓰기·소문자·콜론·괄호·이모지도 인식', () => {
+    const fu = (h: string) => parseInterviewSheet(`${h}\n#김하나/여/1234/성북/양하늘/한솔/-/메모`)[0].followUp;
+    for (const h of ['▪️후속연결O', '▪️후속 연결 o', '후속연결: O', '▪️후속연결 (O)', '후속연결 - ⭕️', '후속연결 ✅']) assert.equal(fu(h), 'O', h);
+    for (const h of ['▪️후속연결X', '후속연결: X', '후속연결 ❌']) assert.equal(fu(h), 'X', h);
+    assert.equal(fu('후속연결 보류'), '보류');
 });
