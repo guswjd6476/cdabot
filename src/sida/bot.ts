@@ -164,6 +164,7 @@ const ACTIONS: Record<string, Action> = {
     조직: { need: null, run: (ctx, a) => askOrg(ctx, MK, a) },
     방등록: { need: 'manager', place: 'group', run: registerGroup },
     방해제: { need: 'manager', place: 'group', run: unregisterGroup },
+    결과주제: { need: 'manager', place: 'group', run: setResultTopic },
     현황판: { need: 'manager', place: 'group', run: setBoard },
 };
 
@@ -361,7 +362,8 @@ async function askNext(ctx: Ctx, f: ResultFlow) {
     await show(
         ctx,
         `✍️ <b>${f.editId ? `결과 #${f.editId} 수정` : '오늘 결과 제출'} — ${R.FORMS[f.form].label}</b> [${fields.indexOf(k) + 1}/${fields.length}]\n` +
-            `<b>${R.fieldLabel(k)}</b>을(를) ${opts.length ? (free ? '선택하거나 직접 입력해주세요.' : '선택해주세요.') : '입력해주세요.'}${HINTS[k] || ''}`,
+            `<b>${R.fieldLabel(k)}</b>을(를) ${opts.length ? (free ? '선택하거나 직접 입력해주세요.' : '선택해주세요.') : '입력해주세요.'}${HINTS[k] || ''}` +
+            (!inPrivate(ctx) && (free || !opts.length) ? '\n(직접 입력은 이 메시지에 <b>답장</b>으로 보내주세요)' : ''),
         [
             ...chunk(
                 opts.map((o, i) => btn(o.slice(0, 30), `sd:rs:pick:${i}`)),
@@ -525,6 +527,9 @@ async function handleFreeForm(ctx: Ctx, text: string): Promise<boolean> {
         await ctx.reply('👥 결과는 특전대 단체방에 올려주세요.');
         return true;
     }
+    const groupOrg = await getGroupOrg(ctx.chat.id, MK);
+    const topic = groupOrg ? (await getSettings(groupOrg, MK))[topicKey(ctx.chat.id)] : null;
+    if (topic && topicOf(ctx) !== topic) return false; // 결과 주제가 따로 있으면 다른 주제의 발/찾 줄은 조용히 무시
     const a = await access(ctx);
     if (!a.org || !hasPerm(a, 'member')) {
         await ctx.reply('🪖 결과를 제출하려면 먼저 특전대 대원 등록이 필요합니다. /특전대 를 눌러 가입 요청해주세요.');
@@ -1118,6 +1123,23 @@ async function unregisterGroup(ctx: Ctx, a: A) {
     await ctx.reply('🔓 단체방 등록을 해제했습니다. 이제 이 방의 새 사용자는 가입 요청이 필요합니다. (이미 등록된 대원은 그대로)');
 }
 
+// 주제(토픽) 방: 메시지가 속한 주제 ID (일반 주제·일반 단체방은 undefined)
+const topicOf = (ctx: Ctx): number | undefined => (ctx.message?.is_topic_message ? ctx.message.message_thread_id : undefined);
+const topicKey = (chatId: number) => `result_topic:${chatId}`;
+
+// 결과(발/찾) 양식을 받을 주제 지정. 지정하면 다른 주제의 발/찾 줄은 무시
+async function setResultTopic(ctx: Ctx, a: A, args: string) {
+    if (/해제/.test(args)) {
+        await setSetting(a.org.id, MK, topicKey(ctx.chat.id), null);
+        return void (await ctx.reply('🔓 결과 주제 지정을 해제했습니다. 이제 이 방 어디서든 발/찾 양식을 받습니다.'));
+    }
+    const topic = topicOf(ctx);
+    if (!topic) return void (await ctx.reply('ℹ️ 결과를 올릴 주제(토픽) 안에서 /특전대 결과주제 를 보내주세요. (해제: /특전대 결과주제 해제)'));
+    await setSetting(a.org.id, MK, topicKey(ctx.chat.id), topic);
+    await audit(a.org.id, a.userId, 'group.result_topic', ctx.chat.id, { topic });
+    await ctx.reply('✅ 이 주제에서만 발/찾 결과 양식을 받습니다. 다른 주제의 대화에는 반응하지 않습니다. (해제: /특전대 결과주제 해제)');
+}
+
 async function closePeriod(ctx: Ctx, a: A) {
     const p = await S.getEditablePeriod(a.org.id, -1); // -1: 수정 허용 예외 없이 '열린' 주차만
     if (!p) return void (await ctx.reply('ℹ️ 제출을 받는 주차가 없습니다.'));
@@ -1298,6 +1320,7 @@ const HELP_MANAGER =
     '• <code>/특전대 답장률 [10.1~10.24]</code> — 대원·도구·지역·팀별 발굴 답장률 (기본 이번 주) · <code>만남 [기간]</code> — 2차 만남 일정 (기본 오늘부터 7일)\n' +
     '• <code>/특전대 미제출</code> · <code>부족시간</code> · <code>마감</code> · <code>재개방 [날짜]</code> · <code>주차시작 [날짜]</code> · <code>수정허용 ID</code>\n' +
     '• 단체방에서: <code>/특전대 방등록</code> (그 방 사람은 가입 요청 없이 자동 대원) · <code>방해제</code>\n' +
+    '• 결과 주제에서: <code>/특전대 결과주제</code> (그 주제의 발/찾만 받음) · <code>결과주제 해제</code>\n' +
     '• 현황판 둘 주제(토픽)에서: <code>/특전대 현황판</code> — 결과·활동 시간이 올라올 때마다 그 메시지를 자동 갱신 (끄기: <code>현황판 해제</code>)\n' +
     '• <code>/특전대 대원</code> — 이름 눌러 대원/관리자/제외 (대원만 집계) · <code>승인</code> · <code>등록 ID 이름</code> · <code>활성/비활성 ID</code> · <code>이름 ID 새이름</code> · <code>옵션</code> · <code>결과수정 번호</code>';
 const HELP_ADMIN = '\n\n🛠 <b>시스템 관리자</b>\n• <code>/특전대 권한 ID member,manager,pii</code> · <code>기준 6</code> · <code>보관기간 365</code> · <code>/조직</code>';
@@ -1399,7 +1422,9 @@ export function registerSida(bot: Telegraf<any>) {
             const f = s.flow?.chatId === ctx.chat.id && fresh ? s.flow : undefined;
             // 입력 중이라도 결과 양식 전체를 붙여넣으면 자동 정리로 시작 (시간 구간 '09:00~12:00' 은 양식 줄로 인식되지 않음)
             if (await handleFreeForm(ctx, text)) return;
-            if (f?.kind === 'result') return setField(ctx, f, text);
+            // 단체방에서는 봇 질문에 답장한 메시지만 입력으로 받음 (일반 대화에 반응하지 않도록)
+            const toBot = inPrivate(ctx) || ctx.message.reply_to_message?.from?.id === ctx.botInfo?.id;
+            if (f?.kind === 'result' && toBot) return setField(ctx, f, text);
             return next();
         })
     );

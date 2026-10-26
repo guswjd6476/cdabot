@@ -56,6 +56,16 @@ async function send(from: number, text: string, mid = ++messageId, chatId = home
     await bot.handleUpdate({ update_id: ++updateId, message: { message_id: mid, date: Math.floor(Date.now() / 1000), chat: chat(from, chatId), from: user(from), text } } as any);
     return texts();
 }
+// 단체방에서 봇 질문에 답장으로 입력
+async function answer(from: number, text: string, chatId = home(from)) {
+    calls = [];
+    const bot1 = { id: 1, is_bot: true, first_name: 'sida' };
+    await bot.handleUpdate({
+        update_id: ++updateId,
+        message: { message_id: ++messageId, date: Math.floor(Date.now() / 1000), chat: chat(from, chatId), from: user(from), text, reply_to_message: { message_id: 1, date: 0, chat: chat(from, chatId), from: bot1, text: '.' } },
+    } as any);
+    return texts();
+}
 async function press(from: number, data: string, chatId = home(from)) {
     calls = [];
     await bot.handleUpdate({
@@ -221,12 +231,13 @@ test('[8][9][11] 발굴건·찾기건 한 줄 양식 — 자동 정리, 빠진 �
     const r2 = await send(101, '발/김영희//25살/여/부산');
     assert.match(r2, /생년 구분은 .* 중에서 선택/); // 허용 밖 값은 확인
     assert.match(r2, /연락처, 생년 구분, 인도팀, 인도자, 도구$/m); // 빠진 칸만 (추측 없음, 2차 만남은 선택이라 안 물음)
-    assert.match(await send(101, '12'), /연락처 형식을 확인/);
-    assert.match(await send(101, '010-2222-3333'), /생년 구분/);
+    assert.equal(await send(101, '점심 뭐 먹지'), ''); // 입력 중이라도 답장 아닌 일반 대화엔 반응 안 함
+    assert.match(await answer(101, '12'), /연락처 형식을 확인/);
+    assert.match(await answer(101, '010-2222-3333'), /생년 구분/);
     assert.match(await press(101, 'sd:rs:pick:1'), /인도팀/);
     await press(101, 'sd:rs:skip');
     await press(101, 'sd:rs:skip');
-    const review = await send(101, '책자');
+    const review = await answer(101, '책자');
     assert.match(review, /3\. 생년 구분: 20대 중/);
     assert.match(review, /6\. 인도팀: <i>\(미입력\)<\/i>/);
     await press(101, 'sd:rs:ok');
@@ -243,10 +254,10 @@ test('[8][9][11] 발굴건·찾기건 한 줄 양식 — 자동 정리, 빠진 �
     // 단계별 입력 (양식 고르기 → 칸마다 질문)
     assert.match(await send(101, '/특전대 결과'), /어떤 결과인가요/);
     assert.match(await press(101, 'sd:rs:form:dig'), /발굴건<\/b> \[1\/10\][\s\S]*이름/);
-    for (const v of ['박영수', '010-3333-4444']) await send(101, v);
+    for (const v of ['박영수', '010-3333-4444']) await answer(101, v);
     await press(101, 'sd:rs:pick:4'); // 모름
     await press(101, 'sd:rs:pick:0'); // 성별 목록 첫 값
-    for (const v of ['서울', '2팀', '홍길동', '전단지', '10.30 15시', '시청역']) await send(101, v);
+    for (const v of ['서울', '2팀', '홍길동', '전단지', '10.30 15시', '시청역']) await answer(101, v);
     assert.match(await press(101, 'sd:rs:ok'), /저장 완료/);
     assert.equal((await S.listResults(1)).length, 4);
 });
@@ -256,7 +267,7 @@ test('[10][12] 결과 수정이 일일 보고서·검색에 반영, 가능 시�
     await press(101, `sd:rs:edit:${first.id}`);
     await press(101, 'sd:rs:ed');
     assert.match(await press(101, 'sd:rs:fx:region'), /인도지역/);
-    assert.match(await send(101, '대구'), /5\. 인도지역: 대구/);
+    assert.match(await answer(101, '대구'), /5\. 인도지역: 대구/);
     assert.match(await press(101, 'sd:rs:ok'), /수정 완료/);
     const log = (await query(`SELECT detail FROM cdabot_audit_logs WHERE action = 'result.update';`)).rows[0].detail;
     assert.deepEqual(log, { changed: ['region'] }); // 감사 로그에 개인정보 값은 남기지 않음
@@ -265,11 +276,13 @@ test('[10][12] 결과 수정이 일일 보고서·검색에 반영, 가능 시�
     const ws = nowKst().startOf('day').subtract((nowKst().day() + 6) % 7, 'day');
     const monId = (await S.insertResult({ orgId: 1, userId: await uid(205), kind: 'find', date: ws.format('YYYY-MM-DD'), values: { name: '월요일' }, dedupKey: 't:mon' }))!;
     const day = await send(ADMIN, '/특전대 오늘현황');
-    assert.match(day, /1\. 당일 결과<\/b> — 총 4건 \(발 3건 \(답장온 2 · 답장 안온 1\) · 찾 1건\)\n• U101: 발 3건 \(답장온 2 · 답장 안온 1\) · 찾 1건\n• 0건: /); // 대원별, 2차 만남 일시가 있는 발굴 = 답장온
+    const monday = ws.format('YYYY-MM-DD') === nowKst().format('YYYY-MM-DD'); // 월요일엔 '월요일' 건도 당일 결과에 들어감
+    if (monday) assert.match(day, /1\. 당일 결과<\/b> — 총 5건 \(발 3건 \(답장온 2 · 답장 안온 1\) · 찾 2건\)/);
+    else assert.match(day, /1\. 당일 결과<\/b> — 총 4건 \(발 3건 \(답장온 2 · 답장 안온 1\) · 찾 1건\)\n• U101: 발 3건 \(답장온 2 · 답장 안온 1\) · 찾 1건\n• 0건: /); // 대원별, 2차 만남 일시가 있는 발굴 = 답장온
     assert.match(day, /2\. 이번 주 누적<\/b> \(.*\) — 총 5건 \(발 3건 \(답장온 2 · 답장 안온 1\) · 찾 2건\)\n• U101: 발 3건 \(답장온 2 · 답장 안온 1\) · 찾 1건\n• 대원05: 발 0건 · 찾 1건/);
     if (ws.format('YYYY-MM-DD') !== nowKst().format('YYYY-MM-DD')) assert.match(day, /3\. 요일별<\/b>\n• 월 .*: 발 0건 · 찾 1건/);
     await S.deleteResult(1, monId);
-    assert.match(day, /<b>발굴건<\/b> 3건[\s\S]*<b>찾기건<\/b> 1건\n• 인도지역: 대전 1/);
+    assert.match(day, new RegExp(`<b>발굴건</b> 3건[\\s\\S]*<b>찾기건</b> ${monday ? 2 : 1}건\n• 인도지역: 대전 1`));
     const regionLine = day.match(/인도지역: (.*)/)![1]; // 발굴건 쪽
     assert.deepEqual(regionLine.split(' · ').sort(), ['대구 1', '부산 1', '서울 1']); // 수정 전 값(서울→대구)은 사라짐
     assert.match(day, /인도팀: (1팀 1 · 2팀 1|2팀 1 · 1팀 1) · \(미입력\) 1/); // 미입력은 맨 뒤 별도
@@ -509,7 +522,7 @@ test('[15] 봇 재시작 후에도 제출 데이터·진행 중 입력 유지', 
     await send(205, '/특전대 결과');
     await press(205, 'sd:rs:form:dig');
     bot = newBot();
-    assert.match(await send(205, '박지성'), /연락처/);
+    assert.match(await answer(205, '박지성'), /연락처/);
 
     // (2) 파일 DB를 닫았다 다시 열어도 데이터 유지
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sidabot-'));
@@ -542,4 +555,23 @@ test('발굴 답장률·2차 만남 일정 — 관리자만, 이름은 개인정
     assert.match(meet, /2차 만남 일정/);
     assert.match(meet, /<b>홍길동<\/b> · 10\.28 19시 · 강남역 · 대원 /);
     assert.match(await send(301, '/특전대 만남 2000.1.1~2099.12.31'), /<b>홍\*동<\/b>[\s\S]*개인정보 권한이 있으면/); // pii 없는 관리자는 가림
+});
+
+test('결과 주제 — 지정한 주제에서만 발/찾 받음', async () => {
+    const ROOM = -100777;
+    const inTopic = async (from: number, text: string, topic?: number) => {
+        calls = [];
+        const m: any = { message_id: ++messageId, date: Math.floor(Date.now() / 1000), chat: { id: ROOM, type: 'supergroup', is_forum: true }, from: user(from), text };
+        if (topic) Object.assign(m, { message_thread_id: topic, is_topic_message: true });
+        await bot.handleUpdate({ update_id: ++updateId, message: m } as any);
+        return texts();
+    };
+    assert.match(await inTopic(ADMIN, '/특전대 방등록'), /자동 등록/);
+    assert.match(await inTopic(ADMIN, '/특전대 결과주제'), /주제\(토픽\) 안에서/); // 일반 주제에선 지정 안 됨
+    assert.match(await inTopic(ADMIN, '/특전대 결과주제', 7), /이 주제에서만/);
+    assert.equal(await inTopic(101, '발/주제밖/010-1111-9999', 9), ''); // 다른 주제는 무시
+    assert.equal(await inTopic(101, '발/주제밖/010-1111-9999'), '');
+    assert.match(await inTopic(101, '발/주제안/010-1111-9998', 7), /자동 정리 결과/);
+    assert.match(await inTopic(ADMIN, '/특전대 결과주제 해제', 7), /해제/);
+    assert.notEqual(await inTopic(101, '발/주제밖/010-1111-9999', 9), '');
 });
