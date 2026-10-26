@@ -229,22 +229,23 @@ test('권한 — 올리기만 하는 사람·특전대 관리자는 추적 화�
 test('/인터뷰 단계 — 기본 전체 기간에서 찾등·합등 (완료일 또는 현재 단계), 기간을 적으면 완료일 기준', async () => {
     assert.match(await send(301, '/인터뷰 단계'), /권한이 없습니다/); // 관리자여도 개인정보 권한 필요
     assert.match(await send(ADMIN, '/인터뷰 권한 302 manager,pii 관리자최'), /관리자최/);
-    // 완료일이 아직 없어도 현재 단계로: 김가람 찾 → 찾등, 이나래 합 → 합등 (찾등 명단엔 다시 안 나옴)
+    // 완료일이 아직 없어도 현재 단계로: 이나래 합 → 합등 (찾등 명단엔 다시 안 나옴)
+    // 후속연결 O 는 행정 연결 없어도 인터뷰 날짜에 찾등: 김가람, 박다솜(행정 미연결)
     let out = await send(302, '/인터뷰 단계');
     assert.match(out, /전체 기간/);
-    assert.match(out, /행정 연결 4명 중 찾등 <b>2명<\/b> · 합등 <b>1명<\/b>/);
-    assert.match(out, /\[합등 1명\]<\/b>\n• 날짜 없음 <b>이나래<\/b> \[향수행사\] 현재 합/);
-    assert.match(out, /\[찾등 \(합등 전\) 1명\]<\/b>\n• 날짜 없음 <b>김가람<\/b>/);
+    assert.match(out, /행정 연결·후속O 5명 중 찾등 <b>3명<\/b> · 합등 <b>1명<\/b>/);
+    assert.match(out, /\[합등 1명\]<\/b>\n• 날짜 없음 <b>이나래<\/b> \[향수행사\] \[후속O\] 현재 합/);
+    assert.match(out, /\[찾등 \(합등 전\) 2명\]<\/b>[\s\S]*<b>박다솜<\/b> \[향수행사\] \[후속O\][\s\S]*<b>김가람<\/b>/);
     assert.equal(calls.filter((c) => c.method === 'sendMessage').length, 1); // 요청한 사람에게만
 
     await query(`UPDATE students SET "찾_완료일" = '2026-10-05', "합_완료일" = '2026-10-21' WHERE "이름" = '김가람'`);
     await query(`UPDATE students SET "찾_완료일" = '2026-10-22' WHERE "이름" = '이나래'`);
     await query(`UPDATE students SET "찾_완료일" = '2026-09-01' WHERE "이름" = '정보라'`); // 오래전 찾등, 지금 탈락
     out = await send(302, '/인터뷰 단계');
-    assert.match(out, /찾등 <b>3명<\/b> · 합등 <b>2명<\/b>/);
-    assert.match(out, /\[합등 2명\]<\/b>\n• 10\/21 <b>김가람<\/b> \[향수행사\] 현재 찾 <i>\(인터뷰 \d+\/\d+ · 성북 · 인도 양하늘,강구름 · 인터뷰 한솔\)<\/i>\n• 날짜 없음 <b>이나래<\/b>/);
-    assert.match(out, /\[찾등 \(합등 전\) 1명\]<\/b>\n• 9\/1 <b>정보라<\/b> \[향수행사\] 현재 탈락/);
-    assert.match(out, /한솔: 찾등 3 · 합등 2/);
+    assert.match(out, /찾등 <b>4명<\/b> · 합등 <b>2명<\/b>/);
+    assert.match(out, /\[합등 2명\]<\/b>\n• 10\/21 <b>김가람<\/b> \[향수행사\] \[후속O\] 현재 찾 <i>\(인터뷰 \d+\/\d+ · 성북 · 인도 양하늘,강구름 · 인터뷰 한솔\)<\/i>\n• 날짜 없음 <b>이나래<\/b>/);
+    assert.match(out, /\[찾등 \(합등 전\) 2명\]<\/b>[\s\S]*\n• 9\/1 <b>정보라<\/b> \[향수행사\] 현재 탈락/);
+    assert.match(out, /한솔: 찾등 4 · 합등 2/);
     assert.doesNotMatch(out, /최미르/); // 발 단계
 
     out = await send(302, '/인터뷰 단계 2026.10.20~2026.10.25'); // 기간을 적으면 그 기간 완료일만
@@ -290,9 +291,10 @@ test('구분별로 나눠 보기 — 현황·미등록·찾등합등에 향수/�
     assert.doesNotMatch(r, /서다온|윤하람/);
     r = await send(ADMIN, '/인터뷰 단계 당터뷰 2026.10.20~2026.10.25');
     assert.match(r, /찾등·합등 \[당터뷰\]/);
-    assert.match(r, /없습니다/); // 찾·합한 사람은 모두 향수행사
+    assert.match(r, /찾등 <b>1명<\/b>[\s\S]*10\/20 <b>윤하람<\/b> \[당터뷰\] \[후속O\]/); // 당터뷰는 후속 O 윤하람만
     r = await send(ADMIN, '/인터뷰 단계 2026.10.20~2026.10.25');
-    assert.match(r, /\[구분별\]<\/b>\n• 향수행사: 찾등 1 · 합등 1/);
+    assert.match(r, /\[구분별\]<\/b>[\s\S]*• 향수행사: 찾등 1 · 합등 1/);
+    assert.match(r, /\[구분별\]<\/b>[\s\S]*• 당터뷰: 찾등 1 · 합등 0/);
 });
 
 test('삭제 — 올린 본인·관리자만, 날짜+이름으로', async () => {

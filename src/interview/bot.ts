@@ -371,13 +371,21 @@ async function searchName(ctx: Ctx, a: A, args: string) {
 // 인터뷰 대상자 중 행정에서 찾등·합등이 된 사람. 기본은 전체 기간, 기간을 적으면 그 기간에 완료된 사람만
 //   완료일(찾_완료일·합_완료일)이 있거나, 비어 있어도 현재 단계가 그 이상(예: 섭)이면 된 것으로 봄 (기간을 적으면 완료일 기준만)
 //   합등한 사람은 찾등 명단에 다시 넣지 않음
+//   후속연결 O 는 행정 연결·완료일이 없어도 찾등 (날짜 = 인터뷰 날짜)
 async function stageUps(ctx: Ctx, a: A, rawArgs: string) {
     const { kind, rest: args } = kindArg(rawArgs);
     const period = args ? range(args, 7) : null;
     const { rows, adminError } = await load(a, { kind });
     if (adminError) return void (await ctx.reply(ADMIN_WARN));
     const seen = new Set<string>();
-    const people = rows.filter((r) => r.student_id && !seen.has(r.student_id) && seen.add(r.student_id)); // 같은 사람 여러 번 인터뷰 → 최근 1건
+    const fu = (r: S.InterviewRow) => r.follow_up === 'O';
+    const people = rows
+        .filter((r) => r.student_id || (fu(r) && r.name))
+        .filter((r) => {
+            const k = r.student_id ?? `n:${r.name}`;
+            return !seen.has(k) && !!seen.add(k);
+        }) // 같은 사람 여러 번 인터뷰 → 최근 1건
+        .map((r) => (fu(r) && !r.chat_date ? { ...r, chat_date: r.interview_date } : r));
     const rankOf = (r: S.InterviewRow) => STAGE_ORDER.indexOf(String(r.stage ?? '').trim().charAt(0));
     const reached = (r: S.InterviewRow, key: 'chat_date' | 'hap_date', stage: string) =>
         period ? !!r[key] && r[key]! >= period.from && r[key]! <= period.to : !!r[key] || rankOf(r) >= STAGE_ORDER.indexOf(stage);
@@ -388,7 +396,7 @@ async function stageUps(ctx: Ctx, a: A, rawArgs: string) {
 
     const byDate = (key: 'chat_date' | 'hap_date') => (x: S.InterviewRow, y: S.InterviewRow) => (y[key] ?? '').localeCompare(x[key] ?? ''); // 최근 완료부터, 날짜 없으면 끝
     const line = (r: S.InterviewRow, key: 'chat_date' | 'hap_date') =>
-        `• ${r[key] ? md(r[key]!) : '날짜 없음'} <b>${e(r.name ?? '(이름 삭제됨)')}</b> [${r.kind}] 현재 ${e(stageOf(r))} <i>(인터뷰 ${md(r.interview_date)}${who(r) ? ` · ${who(r)}` : ''})</i>`;
+        `• ${r[key] ? md(r[key]!) : '날짜 없음'} <b>${e(r.name ?? '(이름 삭제됨)')}</b> [${r.kind}]${fu(r) ? ' [후속O]' : ''} 현재 ${e(stageOf(r))} <i>(인터뷰 ${md(r.interview_date)}${who(r) ? ` · ${who(r)}` : ''})</i>`;
     const section = (title: string, list: S.InterviewRow[], key: 'chat_date' | 'hap_date') =>
         list.length ? `\n<b>[${title} ${list.length}명]</b>\n${[...list].sort(byDate(key)).map((r) => line(r, key)).join('\n')}\n` : '';
     // 구분별·인터뷰자별 건수
@@ -407,14 +415,14 @@ async function stageUps(ctx: Ctx, a: A, rawArgs: string) {
     await replyLong(
         ctx,
         `📈 <b>인터뷰 대상자 찾등·합등${kindTitle(kind)}</b> ${period ? `${md(period.from)}~${md(period.to)}` : '전체 기간'}\n\n` +
-            `• 행정 연결 ${people.length}명 중 찾등 <b>${chat.length}명</b> · 합등 <b>${hap.length}명</b>\n` +
+            `• 행정 연결·후속O ${people.length}명 중 찾등 <b>${chat.length}명</b> · 합등 <b>${hap.length}명</b>\n` +
             (total
                 ? section('합등', hap, 'hap_date') +
                   section('찾등 (합등 전)', chatOnly, 'chat_date') +
                   (kind ? '' : `\n<b>[구분별]</b>\n${tally((r) => r.kind)}\n`) +
                   `\n<b>[인터뷰자별]</b>\n${tally((r) => r.interviewer)}\n`
                 : `\n${period ? '이 기간에 ' : ''}찾등·합등한 인터뷰 대상자가 없습니다.\n`) +
-            `\n<i>행정 DB 기준 (날짜 = 찾·합 완료일) · 개인정보 포함 — 외부 공유 금지</i>`
+            `\n<i>행정 DB 기준 (날짜 = 찾·합 완료일, 후속연결 O 는 인터뷰 날짜에 찾등) · 개인정보 포함 — 외부 공유 금지</i>`
     );
 }
 
@@ -483,7 +491,7 @@ const HELP =
     `• <code>/인터뷰 미등록 [기간]</code> — 후속 O·보류인데 행정에 없는 사람 (개인정보 권한)\n• <code>/인터뷰 검색 이름</code> (개인정보 권한)\n` +
     `• <code>/인터뷰 특전대 [10.26] [향수|당터뷰]</code> — 특전대 기간(주차)에만, 그날 인터뷰한 사람을 특전대 결과로 (모두 발굴, 후속 O 는 찾기도. 미리보기 후 등록)\n` +
     `• 단체방에서 <code>/인터뷰 방등록</code> · <code>방해제</code>\n` +
-    `• <code>/인터뷰 단계 [10.1~10.24]</code> — 찾등·합등한 인터뷰 대상자 (기본 전체 기간, 기간을 적으면 그 기간 완료자만, 개인정보 권한)\n\n` +
+    `• <code>/인터뷰 단계 [10.1~10.24]</code> — 찾등·합등한 인터뷰 대상자 (후속연결 O 포함, 기본 전체 기간, 기간을 적으면 그 기간 완료자만, 개인정보 권한)\n\n` +
     `<b>시스템 관리자</b>: <code>/인터뷰 권한 ID manager,pii [이름]</code> · <code>/인터뷰 보관기간 365</code>\n\n` +
     `행정 등록은 카운셀링 봇 행정 DB에서 <b>이름 + 인도자</b>(인도자가 없으면 지역)로 찾습니다. 같은 이름이 여러 명이면 연결하지 않고 '확인 필요'로 둡니다.`;
 

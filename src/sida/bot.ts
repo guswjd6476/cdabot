@@ -693,13 +693,14 @@ function kindCount(rows: S.ResultRow[]) {
     return `발 ${rows.filter((r) => r.kind === 'dig').length}건${digSplit(rows)} · 찾 ${rows.filter((r) => r.kind === 'find').length}건`;
 }
 
-// 대원별 '이름: 발 n건 · 찾 n건' (많은 순)
+// 대원별 '이름: 발 n건 · 찾 n건' (총 건수 → 발 → 찾 많은 순)
 function perPerson(rows: S.ResultRow[], members: Membership[]) {
     const names = new Map(members.map((m) => [m.user_id, m.display_name]));
     const by = new Map<number, S.ResultRow[]>();
     for (const r of rows) by.set(r.user_id, [...(by.get(r.user_id) || []), r]);
+    const digs = (rs: S.ResultRow[]) => rs.filter((r) => r.kind === 'dig').length;
     const lines = [...by.entries()]
-        .sort((x, y) => y[1].length - x[1].length)
+        .sort((x, y) => y[1].length - x[1].length || digs(y[1]) - digs(x[1]))
         .map(([uid, rs]) => `• ${e(names.get(uid) || rs[0].submitter || '?')}: ${kindCount(rs)}`);
     return lines.join('\n') || '• 아직 없습니다.';
 }
