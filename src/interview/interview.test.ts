@@ -350,20 +350,19 @@ test('/인터뷰 특전대 — 미리보기 → 등록, 인도자와 같은 이�
         return calls.filter((c) => c.method === 'sendMessage').map((c) => c.payload.text).join('\n---\n');
     };
     const pv = await press(btnData);
-    assert.match(pv, /발굴 2건 · 찾기 1건/);
+    assert.match(pv, /발굴 1건 · 찾기 1건/);
     assert.match(pv, /발\/이가온\/0001\/20대 초\/\/성북\/1\/양하늘\/당터뷰\/\+10\.30\(금\),노원\n  → 대원 양하늘/); // 행정 members 의 인도자 지역, 팀은 구역 '1-1' 의 앞자리
     assert.match(pv, /찾\/이가온\/071012\/성북\/1\/양하늘 *\n/);
-    assert.match(pv, /발\/김건모\/\/20대 초\/남\/노원\/3\/문별\/당터뷰\n  → 대원 \(매칭 안 됨/);
+    assert.match(pv, /제외 1명: 김건모\(문별\)/); // 인도자 이름의 대원이 없으면 등록 안 함
     const okData = calls.flatMap((c) => c.payload?.reply_markup?.inline_keyboard?.flat() ?? []).find((b: any) => b.text.startsWith('✅')).callback_data;
-    assert.match(await press(okData), /특전대 결과 3건 등록/);
+    assert.match(await press(okData), /특전대 결과 2건 등록/);
     const rs = (await query(`SELECT r.kind, r.name, r.meet_at, u.telegram_id::text AS tg FROM cdabot_results r JOIN cdabot_users u ON u.id = r.user_id WHERE r.activity_date = '2026-10-02' ORDER BY r.name DESC, r.kind`)).rows;
     assert.deepEqual(rs.map((r) => [r.kind, r.name, r.meet_at, r.tg]), [
         ['dig', '이가온', '10.30(금)', '4242'],
         ['find', '이가온', null, '4242'],
-        ['dig', '김건모', null, String(ADMIN)], // 매칭 안 되면 등록한 사람
     ]);
     assert.match(await press(okData), /0건 등록/); // 다시 눌러도 안 늘어남
-    assert.match(await press(btnData), /등록할 사람이 없습니다. \(이미 등록 3건\)/);
+    assert.match(await press(btnData), /등록할 사람이 없습니다. \(이미 등록 2건\)[\s\S]*김건모/);
 });
 
 test('보관기간 지나면 이름·연락처·메모 삭제, 건수는 유지', async () => {

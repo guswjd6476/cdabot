@@ -165,7 +165,10 @@ async function sidaPlan(a: A, date: string, kind?: InterviewKind) {
         })
     );
     const saved = await SS.savedKeys(items.map((x) => x.key));
-    return { items: items.filter((x) => !saved.has(x.key)), already: items.filter((x) => saved.has(x.key)).length, adminError };
+    const fresh = items.filter((x) => !saved.has(x.key));
+    // 인도자와 같은 이름의 대원이 없으면 등록하지 않음 (누른 사람 실적으로 잡히면 안 됨)
+    const unmatched = [...new Set(fresh.filter((x) => !x.owner).map((x) => `${x.values.name}(${x.values.guide || '인도자 없음'})`))];
+    return { items: fresh.filter((x) => x.owner), unmatched, already: items.length - fresh.length, adminError };
 }
 
 // 올린 양식 모양 한 줄 (발/이름/…/+2차만남일시,장소)
@@ -188,15 +191,16 @@ async function sidaPreview(ctx: Ctx, a: A, args: string, given?: { date: string;
     if (!(await inSidaWeek(a.org.id, date))) return void (await ctx.reply(NOT_SIDA_WEEK));
     const p = await sidaPlan(a, date, kind);
     const title = `🪖 <b>${md(date)}${kindTitle(kind)} 특전대 결과로 등록</b>`;
-    if (!p.items.length) return void (await ctx.reply(`${title}\n\n등록할 사람이 없습니다.${p.already ? ` (이미 등록 ${p.already}건)` : ''}`, { parse_mode: 'HTML' }));
+    const skipped = p.unmatched.length ? `\n\n⏭ 인도자와 같은 이름의 특전대 대원이 없어 제외 ${p.unmatched.length}명: ${e(p.unmatched.join(', '))}` : '';
+    if (!p.items.length) return void (await ctx.reply(`${title}\n\n등록할 사람이 없습니다.${p.already ? ` (이미 등록 ${p.already}건)` : ''}${skipped}`, { parse_mode: 'HTML' }));
     const dig = p.items.filter((x) => x.kind === 'dig').length;
-    const lines = p.items.map((x) => `${sidaLine(x)}\n  → 대원 ${x.owner ? e(x.owner.name) : '(매칭 안 됨: 등록하는 사람)'}${x.notes.length ? ` · ⚠️ ${e(x.notes.join(', '))}` : ''}`);
+    const lines = p.items.map((x) => `${sidaLine(x)}\n  → 대원 ${e(x.owner!.name)}${x.notes.length ? ` · ⚠️ ${e(x.notes.join(', '))}` : ''}`);
     await replyLong(
         ctx,
         `${title}\n발굴 ${dig}건 · 찾기 ${p.items.length - dig}건${p.already ? ` · 이미 등록 ${p.already}건 제외` : ''}\n` +
             `<i>모두 발굴, 후속연결 O 는 찾기도. 인도지역·인도팀은 행정 인도자 정보로 채움</i>` +
             (p.adminError ? '\n⚠️ 행정 DB를 읽지 못해 인도팀이 비어 있습니다.' : '') +
-            `\n\n${lines.join('\n')}\n\n빈 칸은 등록 후 특전대 <code>/특전대 내결과</code> 에서 고칠 수 있습니다.`,
+            `\n\n${lines.join('\n')}${skipped}\n\n빈 칸은 등록 후 특전대 <code>/특전대 내결과</code> 에서 고칠 수 있습니다.`,
         { ...Markup.inlineKeyboard([[btn(`✅ ${p.items.length}건 등록`, `iv:sd:ok:${date}:${kind ? KIND_CODE[kind] : 'a'}`)]]) }
     );
 }
@@ -212,7 +216,7 @@ async function sidaRegister(ctx: Ctx, a: A, date: string, kind?: InterviewKind) 
             dups.push(`${R.FORMS[x.kind].marker} ${e(who.name)}`);
             continue;
         }
-        if (await SS.insertResult({ orgId: a.org.id, userId: x.owner?.id ?? a.userId, kind: x.kind, date, values: x.values, dedupKey: x.key })) created++;
+        if (await SS.insertResult({ orgId: a.org.id, userId: x.owner!.id, kind: x.kind, date, values: x.values, dedupKey: x.key })) created++;
     }
     await audit(a.org.id, a.userId, 'interview.to_sida', date, { created, kind: kind ?? null });
     if (created) await refreshBoard(ctx.telegram, a.org.id).catch((err) => console.error('[현황판 갱신 실패]:', err));
