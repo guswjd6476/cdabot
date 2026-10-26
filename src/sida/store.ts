@@ -164,6 +164,12 @@ export async function isDuplicateResult(orgId: number, kind: FormKind, name: str
     return res.rows.length > 0;
 }
 
+// 같은 이름의 찾기건이 이미 있는지 (인터뷰 후속 O·행정 찾등 두 경로에서 한 사람이 두 번 들어가지 않게)
+export async function findNameExists(orgId: number, name: string): Promise<boolean> {
+    const res = await query(`SELECT 1 FROM cdabot_results WHERE org_id = $1 AND kind = 'find' AND deleted_at IS NULL AND name = $2 LIMIT 1;`, [orgId, name]);
+    return res.rows.length > 0;
+}
+
 export async function getResult(orgId: number, id: number): Promise<ResultRow | undefined> {
     return (await query(`${RESULT_SELECT} WHERE r.org_id = $1 AND r.id = $2 AND r.deleted_at IS NULL;`, [orgId, id])).rows[0];
 }

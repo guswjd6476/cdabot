@@ -8,7 +8,7 @@ import { runMigrations } from './db';
 import { getErrorMessage } from './utils';
 import { describeAccess, isSysadmin, registerCore } from './core/engine';
 import { registerSida } from './sida/bot';
-import { registerInterview } from './interview/bot';
+import { registerInterview, syncAdminFinds } from './interview/bot';
 import { purgeExpiredInterviews } from './interview/store';
 import { purgeExpiredPii } from './sida/store';
 
@@ -128,6 +128,11 @@ server.listen(PORT, async () => {
     } catch (err: unknown) {
         console.error('🚨 [DB 마이그레이션 실패] 시다봇 기능이 동작하지 않을 수 있습니다:', getErrorMessage(err));
     }
+
+    // 행정(카운셀링 봇) 찾등 → 특전대 찾기건 자동 등록 (10분마다)
+    const sync = () => syncAdminFinds(bot.telegram).catch((err) => console.error('[행정 찾등 반영 실패]:', getErrorMessage(err)));
+    void sync();
+    setInterval(sync, 10 * 60 * 1000);
 
     if (WEBHOOK_URL) {
         try {

@@ -45,6 +45,19 @@ export async function findStudent(e: { name: string; guides: string[]; region: s
     return rows.length === 1 ? { id: rows[0].id, note: null } : { id: null, note: rows.length ? 'multi' : 'none' };
 }
 
+// 행정에서 찾등(찾_완료일)이 그 기간에 된 사람과 인도자(members 이름·지역·팀) — 특전대 찾기건 자동 등록용
+export async function adminFinds(from: string, to: string) {
+    return (
+        await query(
+            `SELECT s.id::text AS id, s."이름" AS name, to_char(s."찾_완료일", 'YYYY-MM-DD') AS date,
+                    m."이름" AS guide, m."지역" AS region, NULLIF(split_part(m."구역", '-', 1), '') AS team
+             FROM students s LEFT JOIN members m ON m."고유번호" = s."인도자_고유번호"
+             WHERE s."찾_완료일" BETWEEN $1::date AND $2::date AND s."이름" IS NOT NULL;`,
+            [from, to]
+        )
+    ).rows as { id: string; name: string; date: string; guide: string | null; region: string | null; team: string | null }[];
+}
+
 // 인도자 이름 → 행정 members 의 지역·팀 (같은 이름이 한 명일 때만). 팀은 구역 '1-2' 의 앞자리 '1'. 행정 DB를 못 읽으면 throw
 export async function guideInfo(names: string[]): Promise<Map<string, GuideInfo>> {
     const rows = (

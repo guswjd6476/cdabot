@@ -2,7 +2,7 @@
 // 카운셀링 봇 행정 DB(students)에 등록됐는지·몇 단계인지 추적. 특전대와 권한·방·데이터 모두 별개
 import { Markup, Telegraf } from 'telegraf';
 import { Access, askOrg, hasPerm, Need, registerModule, resolveAccess, session } from '../core/engine';
-import { audit, autoEnroll, getGroupOrg, getMember, listMembers, Perm, PERMS, setGroupOrg, setSetting, updateMembership, upsertMembership, upsertUser } from '../core/store';
+import { audit, autoEnroll, getGroupOrg, getMember, listMembers, listOrgs, Perm, PERMS, setGroupOrg, setSetting, updateMembership, upsertMembership, upsertUser } from '../core/store';
 import { refreshBoard } from '../sida/bot';
 import * as R from '../sida/result';
 import * as SS from '../sida/store';
@@ -144,7 +144,38 @@ const SIDA_MK = SS.MODULE_KEY; // 특전대 대원 모듈 ('special')
 
 // 특전대 기간: 관리자가 만든 특전대 주차(월~일) 안의 날짜일 때만 등록 기능을 켬
 const inSidaWeek = async (orgId: number, date: string) =>
-    !!(await SS.getPeriodByWeek(orgId, dayjs(date).subtract((dayjs(date).day() + 6) % 7, 'day').format('YYYY-MM-DD')));
+    !!(await SS.getPeriodByWeek(orgId, weekStart(date)));
+const weekStart = (date: string) => dayjs(date).subtract((dayjs(date).day() + 6) % 7, 'day').format('YYYY-MM-DD');
+
+// 인도자 이름 → 같은 이름의 특전대 대원 (한 명일 때만)
+async function sidaOwners(orgId: number) {
+    const byName = new Map<string, number[]>();
+    for (const m of await listMembers(orgId, SIDA_MK)) byName.set(m.display_name.replace(/\s+/g, ''), [...(byName.get(m.display_name.replace(/\s+/g, '')) || []), m.user_id]);
+    return (g?: string | null) => (g && byName.get(g)?.length === 1 ? { id: byName.get(g)![0], name: g } : undefined);
+}
+
+// 행정(카운셀링 봇)에서 찾등이 되면 특전대 찾기건으로 자동 등록 → 현황판 반영. 서버가 10분마다 호출
+//   이번 특전대 주차 안의 찾_완료일만, 실적은 인도자와 같은 이름의 대원(없으면 안 넣음), 같은 이름 찾기건이 이미 있으면(인터뷰 후속 O 등) 안 넣음
+export async function syncAdminFinds(telegram: Telegraf['telegram']) {
+    const to = today();
+    const ws = weekStart(to);
+    for (const org of await listOrgs()) {
+        if (!(await SS.getPeriodByWeek(org.id, ws))) continue;
+        const ownerOf = await sidaOwners(org.id);
+        let created = 0;
+        for (const s of await S.adminFinds(ws, to)) {
+            const owner = ownerOf(s.guide);
+            if (!owner || (await SS.findNameExists(org.id, s.name))) continue;
+            const values = Object.fromEntries(Object.entries({ name: s.name, region: s.region, team: s.team, guide: s.guide }).filter(([, v]) => v)) as R.ResultValues;
+            if (await SS.insertResult({ orgId: org.id, userId: owner.id, kind: 'find', date: s.date, values, dedupKey: `ad:${org.id}:${s.id}:find` })) created++;
+        }
+        if (created) {
+            await audit(org.id, null, 'admin.to_sida', ws, { created });
+            await refreshBoard(telegram, org.id).catch((err) => console.error('[현황판 갱신 실패]:', err));
+        }
+    }
+}
+
 const NOT_SIDA_WEEK = 'ℹ️ 특전대 기간(주차)이 아닌 날짜라 특전대 결과로 등록하지 않습니다.';
 
 async function sidaPlan(a: A, date: string, kind?: InterviewKind) {
@@ -158,9 +189,7 @@ async function sidaPlan(a: A, date: string, kind?: InterviewKind) {
         adminError = true;
     }
     const opts = await SS.listOptions(a.org.id);
-    const byName = new Map<string, number[]>();
-    for (const m of await listMembers(a.org.id, SIDA_MK)) byName.set(m.display_name.replace(/\s+/g, ''), [...(byName.get(m.display_name.replace(/\s+/g, '')) || []), m.user_id]);
-    const ownerOf = (g?: string) => (g && byName.get(g)?.length === 1 ? { id: byName.get(g)![0], name: g } : undefined);
+    const ownerOf = await sidaOwners(a.org.id);
     const items = people.flatMap((r) =>
         interviewToForms(r, info.get(r.guides[0]), nowKst().year()).map((f) => {
             const c = R.cleanForm(f, opts);
@@ -228,8 +257,8 @@ async function toSida(ctx: Ctx, a: A, date: string, kind?: InterviewKind) {
     const dups: string[] = [];
     for (const x of p.items) {
         const who = R.personOf(x.kind, x.values);
-        if (who && (await SS.isDuplicateResult(a.org.id, x.kind, who.name, who.digits))) {
-            dups.push(`${R.FORMS[x.kind].marker} ${e(who.name)}`);
+        if ((who && (await SS.isDuplicateResult(a.org.id, x.kind, who.name, who.digits))) || (x.kind === 'find' && (await SS.findNameExists(a.org.id, x.values.name!)))) {
+            dups.push(`${R.FORMS[x.kind].marker} ${e(x.values.name!)}`);
             continue;
         }
         if (await SS.insertResult({ orgId: a.org.id, userId: x.owner!.id, kind: x.kind, date, values: x.values, dedupKey: x.key })) created++;
