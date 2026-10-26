@@ -769,6 +769,11 @@ export async function refreshBoard(telegram: Telegraf['telegram'], orgId: number
     const m = await telegram.sendMessage(b.chatId, html, { parse_mode: 'HTML', message_thread_id: b.threadId });
     await setSetting(orgId, MK, 'board', { ...b, date, messageId: m.message_id });
 }
+// 현황판 방(주제)에 알림 보내기. 현황판이 없으면 안 보냄
+export async function notifyBoardRoom(telegram: Telegraf['telegram'], orgId: number, html: string) {
+    const b: Board | null = (await getSettings(orgId, MK)).board;
+    if (b) await telegram.sendMessage(b.chatId, html, { parse_mode: 'HTML', message_thread_id: b.threadId });
+}
 // 현황판: 오늘 올라온 결과를 올라온 순서대로 한 줄씩. 코드 블록이라 눌러서 통째로 복사됨
 function boardList(results: S.ResultRow[], budget: number) {
     const title = `<b>📋 오늘 올라온 결과</b> ${results.length}건 (눌러서 복사)`;

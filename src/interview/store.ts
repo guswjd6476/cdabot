@@ -52,7 +52,8 @@ const key4 = (col: string) => `NULLIF(right(regexp_replace(COALESCE(${col}, ''),
 export async function adminFindsOfDigs(orgId: number, moduleKey: string, from: string, to: string) {
     return (
         await query(
-            `SELECT r.user_id, r.name, r.region, r.team, r.guide, st.id::text AS student_id, to_char(ev.at, 'YYYY-MM-DD') AS date
+            `SELECT r.user_id, r.name, r.region,
+                    (SELECT mb.display_name FROM cdabot_memberships mb WHERE mb.org_id = r.org_id AND mb.user_id = r.user_id AND mb.module_key = $2) AS submitter, r.team, r.guide, st.id::text AS student_id, to_char(ev.at, 'YYYY-MM-DD') AS date
              FROM cdabot_results r
              JOIN LATERAL (
                  SELECT array_agg(s.id) AS ids FROM students s
@@ -72,7 +73,7 @@ export async function adminFindsOfDigs(orgId: number, moduleKey: string, from: s
              ORDER BY r.activity_date, r.id;`,
             [orgId, moduleKey, from, to]
         )
-    ).rows as { user_id: number; name: string; region: string | null; team: string | null; guide: string | null; student_id: string; date: string }[];
+    ).rows as { user_id: number; submitter: string | null; name: string; region: string | null; team: string | null; guide: string | null; student_id: string; date: string }[];
 }
 
 // 인도자 이름 → 행정 members 의 지역·팀 (같은 이름이 한 명일 때만). 팀은 구역 '1-2' 의 앞자리 '1'. 행정 DB를 못 읽으면 throw

@@ -388,8 +388,16 @@ test('특전대 기간에 발굴한 사람의 인터뷰 사후 보고서(후속 
     await syncAdminFinds(bot.telegram);
     assert.equal((await query(`SELECT 1 FROM cdabot_results WHERE dedup_key LIKE 'ad:%'`)).rows.length, 0); // 특전대 주차가 없으면 안 넣음
     await createPeriod(1, ws);
+    await setSetting(1, 'special', 'board', { chatId: -100777, threadId: 9 });
+    calls = [];
     await syncAdminFinds(bot.telegram);
+    const alert = calls.find((c) => c.method === 'sendMessage' && /후속 신청/.test(c.payload.text))?.payload;
+    assert.equal(alert?.chat_id, -100777);
+    assert.equal(alert?.message_thread_id, 9); // 현황판 주제에
+    assert.match(alert?.text, /찾기 등록<\/b> 2건\n• 문별 대원: 한\*을 \(\d+\/\d+\)\n• 문별 대원: 윤\*/); // 이름은 가림
+    calls = [];
     await syncAdminFinds(bot.telegram); // 두 번 돌아도 한 번만
+    assert.equal(calls.filter((c) => c.method === 'sendMessage').length, 0);
     const rs = (await query(`SELECT r.name, r.activity_date::text AS d, r.team, r.guide, u.telegram_id::text AS tg FROM cdabot_results r JOIN cdabot_users u ON u.id = r.user_id WHERE r.dedup_key LIKE 'ad:%' ORDER BY r.name DESC`)).rows;
     assert.deepEqual(rs.map((r) => [r.name, r.d, r.team, r.guide, r.tg]), [
         ['한가을', today, '1', '양하늘', '4343'], // 실적은 발굴한 대원

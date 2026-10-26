@@ -3,7 +3,7 @@
 import { Markup, Telegraf } from 'telegraf';
 import { Access, askOrg, hasPerm, Need, registerModule, resolveAccess, session } from '../core/engine';
 import { audit, autoEnroll, getGroupOrg, getMember, listMembers, listOrgs, Perm, PERMS, setGroupOrg, setSetting, updateMembership, upsertMembership, upsertUser } from '../core/store';
-import { refreshBoard } from '../sida/bot';
+import { notifyBoardRoom, refreshBoard } from '../sida/bot';
 import * as R from '../sida/result';
 import * as SS from '../sida/store';
 import { dayjs, escapeHtml as e, nowKst, parseFlexibleDate, replyLong } from '../utils';
@@ -161,15 +161,20 @@ export async function syncAdminFinds(telegram: Telegraf['telegram']) {
     const ws = weekStart(to);
     for (const org of await listOrgs()) {
         if (!(await SS.getPeriodByWeek(org.id, ws))) continue;
-        let created = 0;
+        const added: string[] = [];
         for (const s of await S.adminFindsOfDigs(org.id, SIDA_MK, ws, to)) {
             if (await SS.findNameExists(org.id, s.name)) continue;
             const values = Object.fromEntries(Object.entries({ name: s.name, region: s.region, team: s.team, guide: s.guide }).filter(([, v]) => v)) as R.ResultValues;
-            if (await SS.insertResult({ orgId: org.id, userId: s.user_id, kind: 'find', date: s.date, values, dedupKey: `ad:${org.id}:${s.student_id}:find` })) created++;
+            if (await SS.insertResult({ orgId: org.id, userId: s.user_id, kind: 'find', date: s.date, values, dedupKey: `ad:${org.id}:${s.student_id}:find` }))
+                added.push(`• ${e(s.submitter ?? '?')} 대원: ${e(R.maskName(s.name))} (${md(s.date)})`);
         }
-        if (created) {
-            await audit(org.id, null, 'admin.to_sida', ws, { created });
+        if (added.length) {
+            await audit(org.id, null, 'admin.to_sida', ws, { created: added.length });
             await refreshBoard(telegram, org.id).catch((err) => console.error('[현황판 갱신 실패]:', err));
+            // 단체방이라 이름은 가림
+            await notifyBoardRoom(telegram, org.id, `🎉 <b>후속 신청 → 찾기 등록</b> ${added.length}건\n${added.join('\n')}`).catch((err) =>
+                console.error('[후속 신청 알림 실패]:', err)
+            );
         }
     }
 }
