@@ -126,6 +126,30 @@ export function validateField(key: FieldKey, raw: string, options: string[] = []
     return { ok: true, value: hit ?? v };
 }
 
+// 칸별 검증. 다시 묻지 않으므로 형식이 안 맞는 값도 입력 그대로 두고 '형식 확인'으로 표시
+export function cleanForm(form: ParsedForm, opts: Record<string, string[]>): ParsedForm {
+    const values: ResultValues = {};
+    const notes = [...form.notes];
+    for (const k of FORMS[form.kind].fields) {
+        const raw = form.values[k];
+        if (!raw) continue;
+        const r = validateField(k, raw, k === 'age_group' ? [] : opts[k] || []);
+        if (r.ok) values[k] = r.value;
+        else {
+            notes.push(`${fieldLabel(k)} 형식 확인`);
+            values[k] = raw;
+        }
+    }
+    return { kind: form.kind, values, notes };
+}
+
+// 같은 사람 판단용: 발굴은 이름 + 연락처 뒷자리 4자리, 찾기는 이름 + 생년월일
+export function personOf(kind: FormKind, v: ResultValues): { name: string; digits: string } | null {
+    const all = (kind === 'dig' ? v.phone : v.birth_date)?.replace(/\D/g, '');
+    const digits = kind === 'dig' ? all?.slice(-4) : all;
+    return v.name && digits ? { name: v.name, digits } : null;
+}
+
 export function maskName(n?: string | null): string {
     if (!n) return '';
     const c = [...n];

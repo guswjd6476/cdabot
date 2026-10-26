@@ -6,11 +6,13 @@ import { PGlite } from '@electric-sql/pglite';
 import { Telegraf, Telegram } from 'telegraf';
 import { query, runMigrations, setQueryable } from '../db';
 import { registerCore } from '../core/engine';
-import { setSetting } from '../core/store';
+import { setSetting, upsertMembership, upsertUser } from '../core/store';
 import { registerSida } from '../sida/bot';
 import { registerInterview } from './bot';
 import { parseInterviewSheet, sheetKind } from './parse';
 import { MODULE_KEY, purgeExpiredInterviews } from './store';
+import { createPeriod } from '../sida/store';
+import { ageGroup, birth6, genderOf, interviewToForms, meetOf } from './toSida';
 
 const ADMIN = 9000; // test-setup 의 ADMIN_IDS
 const GROUP = -100777;
@@ -278,6 +280,66 @@ test('삭제 — 올린 본인·관리자만, 날짜+이름으로', async () => 
     assert.match(await send(ADMIN, '/인터뷰 삭제 2026.10.20 윤하람'), /삭제했습니다/); // 관리자는 남의 것도
     assert.match(await send(ADMIN, '/인터뷰 삭제 2026.10.20 윤하람'), /기록이 없습니다/);
     assert.equal((await query(`SELECT count(*)::int AS n FROM cdabot_interviews WHERE name IN ('윤하람', '홍새봄봄')`)).rows[0].n, 0);
+});
+
+test('특전대 양식으로 바꾸기 — 모두 발굴, 후속 O 는 찾기도, 메모에서 생년·성별·2차 만남', () => {
+    const [o, x] = parseInterviewSheet(`▪️후속연결O
+#이가온/성북/양하늘/손바람/10.30(금) 시간대 상관없음,노원/자율전공 1학년, 010-1234-0001
+07.10.12 인터뷰 체크함
+▪️후속연결 X
+#김건모/?/?/황금새/남 intp 22살, 여자친구 주려고 옴`);
+    const toRow = (e: typeof o) => ({ ...e, follow_up: e.followUp, birth_date: e.birthDate, kind: '향수행사' as const });
+    const forms = interviewToForms(toRow(o), { region: '성북구', team: '1-1' }, 2026);
+    assert.deepEqual(forms.map((f) => f.kind), ['dig', 'find']);
+    assert.deepEqual(forms[0].values, {
+        name: '이가온', region: '성북구', team: '1-1', guide: '양하늘', phone: '0001', // 뒷자리만
+        age_group: '20대 초', tool: '향수행사', meet_at: '10.30(금) 시간대 상관없음', meet_place: '노원',
+    });
+    assert.deepEqual(forms[1].values, { name: '이가온', region: '성북구', team: '1-1', guide: '양하늘', birth_date: '071012' });
+    const xf = interviewToForms(toRow(x), undefined, 2026);
+    assert.deepEqual(xf.map((f) => f.kind), ['dig']); // 후속 X 는 발굴만, 2차 만남 없음(답장 안온)
+    assert.deepEqual(xf[0].values, { name: '김건모', age_group: '20대 초', gender: '남', tool: '향수행사' }); // '?' 지역은 빈 칸
+    assert.equal(birth6(null, '05년생3.9생일, 010-2222-3333'), '050309');
+    assert.equal(birth6(null, '10.30 노원'), null);
+    assert.equal(ageGroup('24살 남성', null, 2026), '20대 중');
+    assert.equal(ageGroup('19살', null, 2026), null);
+    assert.equal(genderOf('3년 사귄 여자친구'), null);
+    assert.equal(meetOf('ISFP, 바둑기사/010'), null);
+    assert.deepEqual(meetOf('평일12시전,노원거주/20살'), { at: '평일12시전', place: '노원거주' });
+});
+
+test('/인터뷰 특전대 — 미리보기 → 등록, 인도자와 같은 이름 대원 실적, 두 번 등록 안 됨', async () => {
+    const u = await upsertUser(4242, '양하늘');
+    await upsertMembership(1, u.id, 'sida', '양하늘', 'active');
+    const sheet = `날짜: 2026.10.2\n구분: 향수행사\n▪️후속연결O\n#이가온/성북/양하늘/손바람/10.30(금),노원/07.10.12, 010-1234-0001\n▪️후속연결X\n#김건모/노원/문별/황금새/남 22살`;
+    await send(ADMIN, sheet);
+    assert.ok(!labelsOf('').includes('🪖 특전대 결과로 등록')); // 특전대 주차가 없으면 버튼 없음
+    assert.match(await send(ADMIN, '/인터뷰 특전대 2026.10.2'), /특전대 기간\(주차\)이 아닌/);
+    await createPeriod(1, '2026-09-28'); // 10.2(금)가 든 주차
+    const saved = await send(ADMIN, sheet);
+    assert.ok(labelsOf('').includes('🪖 특전대 결과로 등록'));
+    const btnData = calls.flatMap((c) => c.payload?.reply_markup?.inline_keyboard?.flat() ?? []).find((b: any) => b.text.startsWith('🪖')).callback_data;
+    assert.match(saved, /2명 저장/);
+    const press = async (data: string) => {
+        calls = [];
+        await bot.handleUpdate({ update_id: ++n, callback_query: { id: String(n), from: { id: ADMIN, is_bot: false, first_name: 'A' }, chat_instance: 'x', data, message: { message_id: 1, date: 0, chat: { id: ADMIN, type: 'private' }, text: '.' } } } as any);
+        return calls.filter((c) => c.method === 'sendMessage').map((c) => c.payload.text).join('\n---\n');
+    };
+    const pv = await press(btnData);
+    assert.match(pv, /발굴 2건 · 찾기 1건/);
+    assert.match(pv, /발\/이가온\/0001\/20대 초\/\/성북\/1-1\/양하늘\/향수행사\/\+10\.30\(금\),노원\n  → 대원 양하늘/); // 행정 members 의 인도자 지역·구역
+    assert.match(pv, /찾\/이가온\/071012\/성북\/1-1\/양하늘 *\n/);
+    assert.match(pv, /발\/김건모\/\/20대 초\/남\/노원\/3-1\/문별\/향수행사\n  → 대원 \(매칭 안 됨/);
+    const okData = calls.flatMap((c) => c.payload?.reply_markup?.inline_keyboard?.flat() ?? []).find((b: any) => b.text.startsWith('✅')).callback_data;
+    assert.match(await press(okData), /특전대 결과 3건 등록/);
+    const rs = (await query(`SELECT r.kind, r.name, r.meet_at, u.telegram_id::text AS tg FROM cdabot_results r JOIN cdabot_users u ON u.id = r.user_id WHERE r.activity_date = '2026-10-02' ORDER BY r.name DESC, r.kind`)).rows;
+    assert.deepEqual(rs.map((r) => [r.kind, r.name, r.meet_at, r.tg]), [
+        ['dig', '이가온', '10.30(금)', '4242'],
+        ['find', '이가온', null, '4242'],
+        ['dig', '김건모', null, String(ADMIN)], // 매칭 안 되면 등록한 사람
+    ]);
+    assert.match(await press(okData), /0건 등록/); // 다시 눌러도 안 늘어남
+    assert.match(await press(btnData), /등록할 사람이 없습니다. \(이미 등록 3건\)/);
 });
 
 test('보관기간 지나면 이름·연락처·메모 삭제, 건수는 유지', async () => {

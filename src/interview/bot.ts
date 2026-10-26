@@ -2,10 +2,14 @@
 // 카운셀링 봇 행정 DB(students)에 등록됐는지·몇 단계인지 추적. 특전대와 권한·방·데이터 모두 별개
 import { Markup, Telegraf } from 'telegraf';
 import { Access, askOrg, hasPerm, Need, registerModule, resolveAccess, session } from '../core/engine';
-import { audit, autoEnroll, getGroupOrg, getMember, Perm, PERMS, setGroupOrg, setSetting, updateMembership, upsertMembership, upsertUser } from '../core/store';
+import { audit, autoEnroll, getGroupOrg, getMember, listMembers, Perm, PERMS, setGroupOrg, setSetting, updateMembership, upsertMembership, upsertUser } from '../core/store';
+import { refreshBoard } from '../sida/bot';
+import * as R from '../sida/result';
+import * as SS from '../sida/store';
 import { dayjs, escapeHtml as e, nowKst, parseFlexibleDate, replyLong } from '../utils';
 import { FOLLOW_UPS, InterviewKind, parseInterviewSheet, sheetKind } from './parse';
 import * as S from './store';
+import { interviewToForms } from './toSida';
 
 const NAME = '인터뷰';
 const MK = S.MODULE_KEY;
@@ -40,6 +44,7 @@ const ACTIONS: Record<string, Action> = {
     미등록: { label: '⏳ 행정 미등록', need: 'pii', place: 'private', run: (ctx, a, args) => unregistered(ctx, a, args) },
     검색: { need: 'pii', place: 'private', run: (ctx, a, args) => searchName(ctx, a, args) },
     삭제: { need: null, place: 'any', run: (ctx, a, args) => removeInterview(ctx, a, args) },
+    특전대: { need: 'manager', place: 'any', run: (ctx, a, args) => sidaPreview(ctx, a, args) }, // 특전대 기간에만 (메뉴엔 안 보임)
     도움말: { label: '❓ 도움말', need: null, place: 'any', run: (ctx) => ctx.reply(HELP, { parse_mode: 'HTML' }) },
     방등록: { need: 'manager', place: 'group', run: registerGroup },
     방해제: { need: 'manager', place: 'group', run: unregisterGroup },
@@ -120,9 +125,101 @@ async function handleSheet(ctx: Ctx, text: string): Promise<boolean> {
             (!dateLine && !group ? '\n💡 지난 날짜 결과면 맨 위에 "날짜: 10.20" 줄을 넣어 다시 보내주세요 (같은 날짜·이름은 덮어씀).' : '') +
             checkText +
             (r.linkError ? '\n⚠️ 행정 DB를 읽지 못해 행정 연결은 나중에 다시 시도합니다.' : ''),
-        { parse_mode: 'HTML' }
+        { parse_mode: 'HTML', ...(hasPerm(a, 'manager') && (await inSidaWeek(a.org!.id, date)) ? Markup.inlineKeyboard([[btn('🪖 특전대 결과로 등록', `iv:sd:p:${date}:${KIND_CODE[kind]}`)]]) : {}) }
     );
     return true;
+}
+
+/* ====================== 특전대 결과로 등록 ====================== */
+// 인터뷰한 사람은 모두 발굴건, 후속연결 O 는 찾기건도. 미리보기 → 확인 후 등록
+// 실적 대원: 특전대 대원 중 인도자와 같은 이름(한 명일 때), 없으면 등록 누른 사람
+
+const KIND_CODE: Record<InterviewKind, string> = { 향수행사: 'h', 당터뷰: 'd' };
+const kindOfCode = (c: string): InterviewKind | undefined => (c === 'h' ? '향수행사' : c === 'd' ? '당터뷰' : undefined);
+const SIDA_MK = 'sida';
+
+// 특전대 기간: 관리자가 만든 특전대 주차(월~일) 안의 날짜일 때만 등록 기능을 켬
+const inSidaWeek = async (orgId: number, date: string) =>
+    !!(await SS.getPeriodByWeek(orgId, dayjs(date).subtract((dayjs(date).day() + 6) % 7, 'day').format('YYYY-MM-DD')));
+const NOT_SIDA_WEEK = 'ℹ️ 특전대 기간(주차)이 아닌 날짜라 특전대 결과로 등록하지 않습니다.';
+
+async function sidaPlan(a: A, date: string, kind?: InterviewKind) {
+    const people = (await S.listInterviews(a.org.id, { from: date, to: date, kind })).rows.filter((r) => r.name);
+    const firstGuides = [...new Set(people.map((r) => r.guides[0]).filter(Boolean))];
+    let info = new Map<string, { region: string | null; team: string | null }>();
+    let adminError = false;
+    try {
+        info = await S.guideInfo(firstGuides);
+    } catch {
+        adminError = true;
+    }
+    const opts = await SS.listOptions(a.org.id);
+    const byName = new Map<string, number[]>();
+    for (const m of await listMembers(a.org.id, SIDA_MK)) byName.set(m.display_name.replace(/\s+/g, ''), [...(byName.get(m.display_name.replace(/\s+/g, '')) || []), m.user_id]);
+    const ownerOf = (g?: string) => (g && byName.get(g)?.length === 1 ? { id: byName.get(g)![0], name: g } : undefined);
+    const items = people.flatMap((r) =>
+        interviewToForms(r, info.get(r.guides[0]), nowKst().year()).map((f) => {
+            const c = R.cleanForm(f, opts);
+            const empty = R.missingCount({ kind: c.kind, ...c.values });
+            return { ...c, notes: [...c.notes, ...(empty ? [`빈 칸 ${empty}개`] : [])], key: `iv:${r.id}:${c.kind}`, owner: ownerOf(r.guides[0]) };
+        })
+    );
+    const saved = await SS.savedKeys(items.map((x) => x.key));
+    return { items: items.filter((x) => !saved.has(x.key)), already: items.filter((x) => saved.has(x.key)).length, adminError };
+}
+
+// 올린 양식 모양 한 줄 (발/이름/…/+2차만남일시,장소)
+function sidaLine(f: R.ParsedForm) {
+    const v = (k: R.FieldKey) => e(f.values[k] || '');
+    if (f.kind === 'find') return `찾/${R.FORMS.find.fields.map(v).join('/')}`.replace(/\/+$/, '');
+    const main = R.FORMS.dig.fields.slice(0, 8).map(v).join('/').replace(/\/+$/, '');
+    return `발/${main}${f.values.meet_at || f.values.meet_place ? `/+${v('meet_at')},${v('meet_place')}` : ''}`;
+}
+
+function sidaArgs(args: string) {
+    const { kind, rest } = kindArg(args);
+    const date = rest ? parseFlexibleDate(rest) : today();
+    return { kind, date };
+}
+
+async function sidaPreview(ctx: Ctx, a: A, args: string, given?: { date: string; kind?: InterviewKind }) {
+    const { date, kind } = given ?? sidaArgs(args);
+    if (!date) return void (await ctx.reply('사용법: /인터뷰 특전대 10.26 [향수|당터뷰]'));
+    if (!(await inSidaWeek(a.org.id, date))) return void (await ctx.reply(NOT_SIDA_WEEK));
+    const p = await sidaPlan(a, date, kind);
+    const title = `🪖 <b>${md(date)}${kindTitle(kind)} 특전대 결과로 등록</b>`;
+    if (!p.items.length) return void (await ctx.reply(`${title}\n\n등록할 사람이 없습니다.${p.already ? ` (이미 등록 ${p.already}건)` : ''}`, { parse_mode: 'HTML' }));
+    const dig = p.items.filter((x) => x.kind === 'dig').length;
+    const lines = p.items.map((x) => `${sidaLine(x)}\n  → 대원 ${x.owner ? e(x.owner.name) : '(매칭 안 됨: 등록하는 사람)'}${x.notes.length ? ` · ⚠️ ${e(x.notes.join(', '))}` : ''}`);
+    await replyLong(
+        ctx,
+        `${title}\n발굴 ${dig}건 · 찾기 ${p.items.length - dig}건${p.already ? ` · 이미 등록 ${p.already}건 제외` : ''}\n` +
+            `<i>모두 발굴, 후속연결 O 는 찾기도. 인도지역·인도팀은 행정 인도자 정보로 채움</i>` +
+            (p.adminError ? '\n⚠️ 행정 DB를 읽지 못해 인도팀이 비어 있습니다.' : '') +
+            `\n\n${lines.join('\n')}\n\n빈 칸은 등록 후 특전대 <code>/특전대 내결과</code> 에서 고칠 수 있습니다.`,
+        { ...Markup.inlineKeyboard([[btn(`✅ ${p.items.length}건 등록`, `iv:sd:ok:${date}:${kind ? KIND_CODE[kind] : 'a'}`)]]) }
+    );
+}
+
+async function sidaRegister(ctx: Ctx, a: A, date: string, kind?: InterviewKind) {
+    if (!(await inSidaWeek(a.org.id, date))) return void (await ctx.reply(NOT_SIDA_WEEK));
+    const p = await sidaPlan(a, date, kind);
+    let created = 0;
+    const dups: string[] = [];
+    for (const x of p.items) {
+        const who = R.personOf(x.kind, x.values);
+        if (who && (await SS.isDuplicateResult(a.org.id, x.kind, who.name, who.digits))) {
+            dups.push(`${R.FORMS[x.kind].marker} ${e(who.name)}`);
+            continue;
+        }
+        if (await SS.insertResult({ orgId: a.org.id, userId: x.owner?.id ?? a.userId, kind: x.kind, date, values: x.values, dedupKey: x.key })) created++;
+    }
+    await audit(a.org.id, a.userId, 'interview.to_sida', date, { created, kind: kind ?? null });
+    if (created) await refreshBoard(ctx.telegram, a.org.id).catch((err) => console.error('[현황판 갱신 실패]:', err));
+    await ctx.reply(
+        `✅ ${md(date)}${kindTitle(kind)} 특전대 결과 ${created}건 등록` + (dups.length ? `\n⏭ 이미 특전대에 있는 사람 ${dups.length}건 제외: ${dups.join(', ')}` : ''),
+        { parse_mode: 'HTML' }
+    );
 }
 
 /* ====================== 추적 화면 (관리자 1:1) ====================== */
@@ -379,6 +476,7 @@ const HELP =
     `<b>관리자</b> (봇과 1:1) — 명령 뒤에 <code>향수</code> 또는 <code>당터뷰</code>를 붙이면 그 구분만 (예: <code>/인터뷰 단계 향수 10.1~10.24</code>)\n• <code>/인터뷰 현황 [10.1~10.24]</code> — 인터뷰 수, 행정 등록·단계, 인터뷰자별·지역별\n` +
     `• <code>/인터뷰 행정 [기간]</code> — 행정에 등록된 인터뷰 대상자를 현재 단계별로 (기본 전체, 개인정보 권한)\n` +
     `• <code>/인터뷰 미등록 [기간]</code> — 후속 O·보류인데 행정에 없는 사람 (개인정보 권한)\n• <code>/인터뷰 검색 이름</code> (개인정보 권한)\n` +
+    `• <code>/인터뷰 특전대 [10.26] [향수|당터뷰]</code> — 특전대 기간(주차)에만, 그날 인터뷰한 사람을 특전대 결과로 (모두 발굴, 후속 O 는 찾기도. 미리보기 후 등록)\n` +
     `• 단체방에서 <code>/인터뷰 방등록</code> · <code>방해제</code>\n` +
     `• <code>/인터뷰 단계 [10.1~10.24]</code> — 찾등·합등한 인터뷰 대상자 (기본 전체 기간, 기간을 적으면 그 기간 완료자만, 개인정보 권한)\n\n` +
     `<b>시스템 관리자</b>: <code>/인터뷰 권한 ID manager,pii [이름]</code> · <code>/인터뷰 보관기간 365</code>\n\n` +
@@ -400,6 +498,15 @@ export function registerInterview(bot: Telegraf<any>) {
     bot.action(/^iv:a:(\S+)$/, run(async (ctx) => {
         await ctx.answerCbQuery().catch(() => {});
         await dispatch(ctx, ctx.match[1]);
+    }));
+    bot.action(/^iv:sd:(p|ok):(\d{4}-\d{2}-\d{2}):([hda])$/, run(async (ctx) => {
+        await ctx.answerCbQuery().catch(() => {});
+        const a = await access(ctx);
+        if (!a.org || !hasPerm(a, 'manager')) return void (await ctx.reply('⛔ 관리자만 특전대 결과로 등록할 수 있습니다.'));
+        const [, op, date, code] = ctx.match;
+        if (op === 'p') return sidaPreview(ctx, a as A, '', { date, kind: kindOfCode(code) });
+        await ctx.editMessageReplyMarkup(undefined).catch(() => {}); // 등록 버튼 두 번 누름 방지
+        await sidaRegister(ctx, a as A, date, kindOfCode(code));
     }));
     bot.on('text', run(async (ctx, next) => {
         const text: string = ctx.message.text;

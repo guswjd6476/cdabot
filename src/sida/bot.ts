@@ -525,27 +525,6 @@ async function handleFreeForm(ctx: Ctx, text: string): Promise<boolean> {
         return true;
     }
     const opts = await S.listOptions(a.org.id);
-    // 칸별 검증. 다시 묻지 않으므로 형식이 안 맞는 값도 입력 그대로 두고 확인 필요로 표시
-    const clean = (form: R.ParsedForm) => {
-        const values: R.ResultValues = {};
-        const notes = [...form.notes];
-        for (const k of R.FORMS[form.kind].fields) {
-            const raw = form.values[k];
-            if (!raw) continue;
-            const r = R.validateField(k, raw, k === 'age_group' ? [] : opts[k] || []);
-            if (r.ok) values[k] = r.value;
-            else {
-                notes.push(`${R.fieldLabel(k)} 형식 확인`);
-                values[k] = raw;
-            }
-        }
-        return { kind: form.kind, values, notes };
-    };
-    const who = (kind: R.FormKind, v: R.ResultValues) => {
-        const all = (kind === 'dig' ? v.phone : v.birth_date)?.replace(/\D/g, '');
-        const digits = kind === 'dig' ? all?.slice(-4) : all; // 연락처는 뒷자리 4자리로 비교
-        return v.name && digits ? { name: v.name, digits } : null;
-    };
     const base = `m:${ctx.chat.id}:${ctx.message.message_id}`;
     if (await S.messageSaved(base)) return true; // 같은 메시지가 다시 들어온 경우 (텔레그램 재전송)
 
@@ -555,8 +534,8 @@ async function handleFreeForm(ctx: Ctx, text: string): Promise<boolean> {
     const warned: string[] = [];
     const seen = new Set<string>();
     for (const [i, form] of forms.entries()) {
-        const one = clean(form);
-        const p = who(one.kind, form.values);
+        const one = R.cleanForm(form, opts);
+        const p = R.personOf(one.kind, form.values); // 형식이 틀린 값도 입력 그대로 비교
         const label = `${i + 1}번째 줄 ${e(one.values.name || '(이름 없음)')}`;
         const key = p && `${one.kind}|${p.name}|${p.digits}`;
         if ((key && seen.has(key)) || (p && (await S.isDuplicateResult(a.org.id, one.kind, p.name, p.digits)))) {
@@ -769,7 +748,7 @@ type Board = { chatId: number; threadId?: number; date?: string; messageId?: num
 
 // 결과·활동 시간이 바뀔 때마다 호출. 날짜가 바뀌면 그날 현황판을 새 메시지로 올림
 // shortcut: 동시에 두 건이 저장되면 날짜 바뀐 직후 현황판 메시지가 2개 생길 수 있음, 문제 되면 잠금 추가
-async function refreshBoard(telegram: Telegraf['telegram'], orgId: number) {
+export async function refreshBoard(telegram: Telegraf['telegram'], orgId: number) {
     const b: Board | null = (await getSettings(orgId, MK)).board;
     if (!b) return;
     const date = today();
