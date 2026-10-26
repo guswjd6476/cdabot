@@ -154,20 +154,18 @@ async function sidaOwners(orgId: number) {
     return (g?: string | null) => (g && byName.get(g)?.length === 1 ? { id: byName.get(g)![0], name: g } : undefined);
 }
 
-// 행정(카운셀링 봇)에서 찾등이 되면 특전대 찾기건으로 자동 등록 → 현황판 반영. 서버가 10분마다 호출
-//   이번 특전대 주차 안의 찾_완료일만, 실적은 인도자와 같은 이름의 대원(없으면 안 넣음), 같은 이름 찾기건이 이미 있으면(인터뷰 후속 O 등) 안 넣음
+// 특전대 기간에 발굴한 사람의 인터뷰 사후 보고서가 카운셀링 봇에 후속 [신청]으로 올라오면(만남 확인) 특전대 찾기건으로 자동 등록
+//   → 현황판·웹 반영. 서버가 10분마다 호출. 이번 특전대 주차 안에 올라온 것만, 실적은 그 발굴건을 올린 대원, 같은 이름 찾기건이 이미 있으면(인터뷰 후속 O 등) 안 넣음
 export async function syncAdminFinds(telegram: Telegraf['telegram']) {
     const to = today();
     const ws = weekStart(to);
     for (const org of await listOrgs()) {
         if (!(await SS.getPeriodByWeek(org.id, ws))) continue;
-        const ownerOf = await sidaOwners(org.id);
         let created = 0;
-        for (const s of await S.adminFinds(ws, to)) {
-            const owner = ownerOf(s.guide);
-            if (!owner || (await SS.findNameExists(org.id, s.name))) continue;
+        for (const s of await S.adminFindsOfDigs(org.id, SIDA_MK, ws, to)) {
+            if (await SS.findNameExists(org.id, s.name)) continue;
             const values = Object.fromEntries(Object.entries({ name: s.name, region: s.region, team: s.team, guide: s.guide }).filter(([, v]) => v)) as R.ResultValues;
-            if (await SS.insertResult({ orgId: org.id, userId: owner.id, kind: 'find', date: s.date, values, dedupKey: `ad:${org.id}:${s.id}:find` })) created++;
+            if (await SS.insertResult({ orgId: org.id, userId: s.user_id, kind: 'find', date: s.date, values, dedupKey: `ad:${org.id}:${s.student_id}:find` })) created++;
         }
         if (created) {
             await audit(org.id, null, 'admin.to_sida', ws, { created });

@@ -45,17 +45,34 @@ export async function findStudent(e: { name: string; guides: string[]; region: s
     return rows.length === 1 ? { id: rows[0].id, note: null } : { id: null, note: rows.length ? 'multi' : 'none' };
 }
 
-// 행정에서 찾등(찾_완료일)이 그 기간에 된 사람과 인도자(members 이름·지역·팀) — 특전대 찾기건 자동 등록용
-export async function adminFinds(from: string, to: string) {
+// 특전대 기간(주차)에 올라온 발굴건 중, 카운셀링 봇에 인터뷰 사후(결과) 보고서가 후속 [신청]으로 [from, to] 사이에 올라온 사람 — 특전대 찾기건 자동 등록용
+//   (카운셀링 봇·웹이 그때 meeting_events 에 source '인터뷰후속' 으로 남김. 날짜 = 그 시각의 한국 날짜)
+//   같은 사람 찾기: 이름 + 연락처 뒷자리 4자리 (둘 중 하나라도 연락처가 없으면 발굴일 14일 전 이후에 행정 등록된 같은 이름). 딱 한 명일 때만
+const key4 = (col: string) => `NULLIF(right(regexp_replace(COALESCE(${col}, ''), '\\D', '', 'g'), 4), '')`;
+export async function adminFindsOfDigs(orgId: number, moduleKey: string, from: string, to: string) {
     return (
         await query(
-            `SELECT s.id::text AS id, s."이름" AS name, to_char(s."찾_완료일", 'YYYY-MM-DD') AS date,
-                    m."이름" AS guide, m."지역" AS region, NULLIF(split_part(m."구역", '-', 1), '') AS team
-             FROM students s LEFT JOIN members m ON m."고유번호" = s."인도자_고유번호"
-             WHERE s."찾_완료일" BETWEEN $1::date AND $2::date AND s."이름" IS NOT NULL;`,
-            [from, to]
+            `SELECT r.user_id, r.name, r.region, r.team, r.guide, st.id::text AS student_id, to_char(ev.at, 'YYYY-MM-DD') AS date
+             FROM cdabot_results r
+             JOIN LATERAL (
+                 SELECT array_agg(s.id) AS ids FROM students s
+                 WHERE btrim(s."이름") = btrim(r.name) AND CASE
+                     WHEN ${key4('r.phone')} IS NOT NULL AND ${key4('s."연락처"')} IS NOT NULL THEN ${key4('s."연락처"')} = ${key4('r.phone')}
+                     ELSE s.created_at >= r.activity_date - 14 END
+             ) m ON cardinality(m.ids) = 1
+             JOIN students st ON st.id = m.ids[1]
+             JOIN LATERAL (
+                 SELECT min(e.occurred_at) AT TIME ZONE 'Asia/Seoul' AS at FROM meeting_events e
+                 WHERE e.student_id = st.id::text AND e.source = '인터뷰후속'
+             ) ev ON ev.at IS NOT NULL
+             WHERE r.org_id = $1 AND r.kind = 'dig' AND r.deleted_at IS NULL AND r.name IS NOT NULL
+               AND EXISTS (SELECT 1 FROM cdabot_periods p WHERE p.org_id = r.org_id AND p.module_key = $2
+                           AND r.activity_date >= p.week_start AND r.activity_date < p.week_start + 7)
+               AND ev.at::date BETWEEN $3::date AND $4::date AND ev.at::date >= r.activity_date
+             ORDER BY r.activity_date, r.id;`,
+            [orgId, moduleKey, from, to]
         )
-    ).rows as { id: string; name: string; date: string; guide: string | null; region: string | null; team: string | null }[];
+    ).rows as { user_id: number; name: string; region: string | null; team: string | null; guide: string | null; student_id: string; date: string }[];
 }
 
 // 인도자 이름 → 행정 members 의 지역·팀 (같은 이름이 한 명일 때만). 팀은 구역 '1-2' 의 앞자리 '1'. 행정 DB를 못 읽으면 throw

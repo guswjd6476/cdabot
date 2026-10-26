@@ -12,7 +12,7 @@ import { registerInterview, syncAdminFinds } from './bot';
 import { nowKst } from '../utils';
 import { parseInterviewSheet, sheetKind } from './parse';
 import { MODULE_KEY, purgeExpiredInterviews } from './store';
-import { createPeriod } from '../sida/store';
+import { createPeriod, insertResult } from '../sida/store';
 import { ageGroup, birth6, genderOf, interviewToForms, meetOf } from './toSida';
 
 const ADMIN = 9000; // test-setup 의 ADMIN_IDS
@@ -365,19 +365,36 @@ test('/인터뷰 특전대 — 특전대 주차면 결과지 올릴 때 자동 �
     assert.match(calls.filter((c) => c.method === 'sendMessage').map((c) => c.payload.text).join('\n'), /특전대 결과 1건 등록/);
 });
 
-test('행정 찾등 → 특전대 찾기건 자동 등록 (이번 특전대 주차만, 인도자 이름 대원 실적, 같은 이름 찾기건 있으면 안 넣음)', async () => {
+test('특전대 기간에 발굴한 사람의 인터뷰 사후 보고서(후속 신청)가 카운셀링 봇에 올라오면 → 그 발굴 대원의 찾기건 자동 등록', async () => {
     const today = nowKst().format('YYYY-MM-DD');
     const ws = nowKst().subtract((nowKst().day() + 6) % 7, 'day').format('YYYY-MM-DD');
-    await query(`INSERT INTO students ("이름", "단계", "인도자_고유번호", "찾_완료일") VALUES
-        ('한가을', '찾', 'M1', $1), ('이가온', '찾', 'M1', $1), ('서나무', '찾', 'M4', $1), ('오래전', '찾', 'M1', '2026-01-01')`, [today]);
+    await query(`ALTER TABLE students ADD COLUMN IF NOT EXISTS "연락처" TEXT, ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT now();
+        CREATE TABLE meeting_events (id SERIAL PRIMARY KEY, chat_id TEXT, student_id TEXT, category TEXT, source TEXT, occurred_at TIMESTAMPTZ DEFAULT now())`);
+    const uid = (await query(`SELECT id FROM cdabot_users WHERE telegram_id = 4343`)).rows[0].id; // 문별 (인도자 아님)
+    const dig = (name: string, phone: string | null) =>
+        insertResult({ orgId: 1, userId: uid, kind: 'dig', date: today, values: { name, phone: phone ?? undefined, guide: '양하늘', team: '1' }, dedupKey: `t:${name}` });
+    await dig('한가을', '1234'); // 행정 연락처 뒷자리 같음 → 찾기
+    await dig('윤봄', null); // 연락처 없음 → 최근 행정 등록 같은 이름 → 찾기
+    await dig('강겨울', '9999'); // 연락처 다름 → 다른 사람
+    await dig('이가온', '0001'); // 인터뷰 후속 O 로 이미 찾기건
+    await dig('조여름', '7777'); // 사후 보고서가 아직 없음 (최초등록만)
+    await query(`INSERT INTO students ("이름", "단계", "인도자_고유번호", "연락처") VALUES
+        ('한가을', '발', 'M1', '010-5555-1234'), ('윤봄', '발', 'M1', NULL), ('강겨울', '발', 'M1', '010-1111-2222'),
+        ('이가온', '발', 'M1', '010-1234-0001'), ('서나무', '발', 'M1', NULL), ('조여름', '발', 'M1', '010-3333-7777')`);
+    // 사후 보고서 후속 [신청] → 카운셀링 봇이 '인터뷰후속' 기록. 서나무는 특전대 발굴이 아님
+    await query(`INSERT INTO meeting_events (chat_id, student_id, category, source)
+        SELECT 'c' || id, id::text, '교사매칭', '인터뷰후속' FROM students WHERE "이름" IN ('한가을', '윤봄', '강겨울', '이가온', '서나무');
+        INSERT INTO meeting_events (chat_id, student_id, category, source) SELECT 'c' || id, id::text, '인터뷰매칭', '최초등록' FROM students WHERE "이름" = '조여름'`);
     await syncAdminFinds(bot.telegram);
-    assert.equal((await query(`SELECT 1 FROM cdabot_results WHERE name = '한가을'`)).rows.length, 0); // 특전대 주차가 없으면 안 넣음
+    assert.equal((await query(`SELECT 1 FROM cdabot_results WHERE dedup_key LIKE 'ad:%'`)).rows.length, 0); // 특전대 주차가 없으면 안 넣음
     await createPeriod(1, ws);
     await syncAdminFinds(bot.telegram);
     await syncAdminFinds(bot.telegram); // 두 번 돌아도 한 번만
-    const rs = (await query(`SELECT r.kind, r.name, r.activity_date::text AS d, r.team, r.guide, u.telegram_id::text AS tg FROM cdabot_results r JOIN cdabot_users u ON u.id = r.user_id WHERE r.dedup_key LIKE 'ad:%'`)).rows;
-    // 이가온: 인터뷰 후속 O 로 이미 찾기건 / 서나무: 인도자(주서영) 대원 없음 / 오래전: 이번 주 아님
-    assert.deepEqual(rs.map((r) => [r.kind, r.name, r.d, r.team, r.guide, r.tg]), [['find', '한가을', today, '1', '양하늘', '4242']]);
+    const rs = (await query(`SELECT r.name, r.activity_date::text AS d, r.team, r.guide, u.telegram_id::text AS tg FROM cdabot_results r JOIN cdabot_users u ON u.id = r.user_id WHERE r.dedup_key LIKE 'ad:%' ORDER BY r.name DESC`)).rows;
+    assert.deepEqual(rs.map((r) => [r.name, r.d, r.team, r.guide, r.tg]), [
+        ['한가을', today, '1', '양하늘', '4343'], // 실적은 발굴한 대원
+        ['윤봄', today, '1', '양하늘', '4343'],
+    ]);
 });
 
 test('보관기간 지나면 이름·연락처·메모 삭제, 건수는 유지', async () => {
