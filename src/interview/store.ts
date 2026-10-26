@@ -15,6 +15,7 @@ export interface InterviewRow {
     region: string | null;
     guides: string[];
     interviewer: string | null;
+    gender: string | null;
     phone: string | null;
     birth_date: string | null;
     memo: string | null;
@@ -64,14 +65,14 @@ export async function saveInterviews(orgId: number, userId: number, date: string
     let created = 0;
     for (const x of entries) {
         const res = await query(
-            `INSERT INTO cdabot_interviews (org_id, user_id, interview_date, name, name_key, follow_up, region, guides, interviewer, phone, birth_date, memo, kind)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+            `INSERT INTO cdabot_interviews (org_id, user_id, interview_date, name, name_key, follow_up, region, guides, interviewer, phone, birth_date, memo, kind, gender)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
              ON CONFLICT (org_id, interview_date, name_key) DO UPDATE SET
                  user_id = EXCLUDED.user_id, name = EXCLUDED.name, follow_up = EXCLUDED.follow_up, region = EXCLUDED.region,
                  guides = EXCLUDED.guides, interviewer = EXCLUDED.interviewer, phone = EXCLUDED.phone,
-                 birth_date = EXCLUDED.birth_date, memo = EXCLUDED.memo, kind = EXCLUDED.kind, updated_at = NOW()
+                 birth_date = EXCLUDED.birth_date, memo = EXCLUDED.memo, kind = EXCLUDED.kind, gender = EXCLUDED.gender, updated_at = NOW()
              RETURNING (xmax = 0) AS created;`,
-            [orgId, userId, date, x.name, nameKey(x.name), x.followUp, x.region, x.guides, x.interviewer, x.phone, x.birthDate, x.memo, kind]
+            [orgId, userId, date, x.name, nameKey(x.name), x.followUp, x.region, x.guides, x.interviewer, x.phone, x.birthDate, x.memo, kind, x.gender]
         );
         if (res.rows[0]?.created) created++;
     }
@@ -103,7 +104,7 @@ export async function linkPending(orgId: number): Promise<{ linked: number; erro
 }
 
 const SELECT = `
-    SELECT i.id, i.interview_date::text AS interview_date, i.kind, i.name, i.follow_up, i.region, i.guides, i.interviewer,
+    SELECT i.id, i.interview_date::text AS interview_date, i.kind, i.name, i.follow_up, i.region, i.guides, i.interviewer, i.gender,
            i.phone, i.birth_date, i.memo, i.student_id, i.match_note, mb.display_name AS poster`;
 const FROM = `
     FROM cdabot_interviews i

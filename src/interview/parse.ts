@@ -1,4 +1,6 @@
-// 당일 인터뷰 결과지 (순수 함수). '▪️후속연결O/보류/X' 구간 아래 '#이름/지역/인도자/인터뷰자/메모' 줄을 사람별로 정리
+// 당일 인터뷰 결과지 (순수 함수). '▪️후속연결O/보류/X' 구간 아래 사람 줄을 정리
+//   새 양식: 섭외자/성별/연락처/지역/인도자/인터뷰자/다음 만남예정일, 장소/간단정보 (둘째 칸이 성별이면 새 양식)
+//   예전 양식: 섭외자/지역/인도자/인터뷰자/다음 만남예정일, 장소/간단정보 (밀린 결과용으로 계속 읽음)
 //   칸 수가 사람마다 달라서 이름·후속 상태·연락처·생년월일만 확실히 뽑고 나머지는 메모 원문으로 둠
 
 export type FollowUp = 'O' | '보류' | 'X';
@@ -24,6 +26,7 @@ export interface InterviewEntry {
     region: string | null;
     guides: string[]; // 인도자 (여러 명 가능)
     interviewer: string | null;
+    gender: string | null; // 새 양식만 ('남'/'여')
     phone: string | null;
     birthDate: string | null;
     memo: string;
@@ -82,9 +85,32 @@ export function parseInterviewSheet(raw: string): InterviewEntry[] {
     return out;
 }
 
+// 새 양식: 둘째 칸이 성별(남·여·남자·여성), 또는 성별이 빈 칸('-')이면서 셋째 칸이 연락처 숫자이거나 칸이 7개 이상 (예전 양식은 보통 6칸 이하)
+const GENDER = /^(남|여)(자|성)?$/;
+const blank = (x?: string) => !x || EMPTY.test(x);
+const isNewForm = (p: string[]) => GENDER.test(p[1] ?? '') || (blank(p[1]) && (/^[\d\s.\-]{4,}$/.test(p[2] ?? '') || p.length >= 7));
+
 function toEntry(head: string, more: string[], followUp: FollowUp | null): InterviewEntry {
     const parts = head.split('/').map((x) => x.trim());
     const name = parts[0].slice(0, 30);
+    const all = [head, ...more].join('\n');
+    const names = (s?: string) => (s && !EMPTY.test(s) ? s.split(',').map((x) => x.trim()).filter(Boolean) : []);
+    if (isNewForm(parts)) {
+        // 칸 위치가 정해져 있음: 이름/성별/연락처/지역/인도자/인터뷰자/다음 만남/간단정보
+        const cell = (i: number) => (parts[i] && !EMPTY.test(parts[i]) && !/^[?？]+$/.test(parts[i]) ? parts[i] : null);
+        const phoneCell = cell(2);
+        return {
+            name,
+            followUp,
+            gender: parts[1]?.match(GENDER)?.[1] ?? null,
+            phone: (phoneCell && (findPhone(phoneCell) ?? (phoneCell.replace(/\D/g, '') || null))) ?? findPhone(all), // 뒷자리만 써도 그대로
+            region: cell(3)?.slice(0, 30) ?? null,
+            guides: names(cell(4) ?? undefined),
+            interviewer: names(cell(5) ?? undefined)[0] ?? null,
+            birthDate: findBirth(all),
+            memo: [parts.slice(6).join('/'), ...more].filter(Boolean).join('\n').slice(0, 2000),
+        };
+    }
     let i = 1;
     let region: string | null = null;
     // 지역 칸 생략 판단: 둘째 칸이 이름 모양이고 이름 칸이 2개 이하로 이어지면 생략된 것 (인도자·인터뷰자는 최대 2칸)
@@ -99,10 +125,8 @@ function toEntry(head: string, more: string[], followUp: FollowUp | null): Inter
     // 이어지는 사람 이름 칸 최대 2개: [인도자, 인터뷰자]. 하나뿐이면 인터뷰자로 봄
     const people: string[] = [];
     while (people.length < 2 && i < parts.length && PEOPLE.test(parts[i])) people.push(parts[i++]);
-    const names = (s?: string) => (s && !EMPTY.test(s) ? s.split(',').map((x) => x.trim()).filter(Boolean) : []);
     const guides = people.length === 2 ? names(people[0]) : [];
     const interviewer = names(people[people.length - 1])[0] ?? null;
     const memo = [parts.slice(i).join('/'), ...more].filter(Boolean).join('\n').slice(0, 2000);
-    const all = [head, ...more].join('\n');
-    return { name, followUp, region, guides, interviewer, phone: findPhone(all), birthDate: findBirth(all), memo };
+    return { name, followUp, region, guides, interviewer, gender: null, phone: findPhone(all), birthDate: findBirth(all), memo };
 }

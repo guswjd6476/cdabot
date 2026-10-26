@@ -13,6 +13,7 @@ export interface InterviewLike {
     region: string | null;
     guides: string[];
     phone: string | null;
+    gender?: string | null; // 새 양식의 성별 칸 (없으면 메모에서)
     birth_date: string | null;
     memo: string | null;
 }
@@ -76,7 +77,7 @@ export function interviewToForms(r: InterviewLike, guide: GuideInfo | undefined,
                 ...common,
                 phone: r.phone?.replace(/\D/g, '').slice(-4),
                 age_group: ageGroup(memo, b6, nowYear),
-                gender: genderOf(memo),
+                gender: r.gender || genderOf(memo),
                 tool: '당터뷰', // 도구는 향수행사·당터뷰 모두 '당터뷰'
                 meet_at: meet?.at,
                 meet_place: meet?.place,
