@@ -164,12 +164,13 @@ export async function isDuplicateResult(orgId: number, kind: FormKind, name: str
     return res.rows.length > 0;
 }
 
-export async function resultExists(dedupKey: string): Promise<boolean> {
-    return (await query(`SELECT 1 FROM cdabot_results WHERE dedup_key = $1;`, [dedupKey])).rows.length > 0;
-}
-
 export async function getResult(orgId: number, id: number): Promise<ResultRow | undefined> {
     return (await query(`${RESULT_SELECT} WHERE r.org_id = $1 AND r.id = $2 AND r.deleted_at IS NULL;`, [orgId, id])).rows[0];
+}
+
+// 이 메시지(base)에서 저장된 줄이 하나라도 있는지 (줄마다 dedup_key = base:줄번호)
+export async function messageSaved(base: string): Promise<boolean> {
+    return (await query(`SELECT 1 FROM cdabot_results WHERE dedup_key LIKE $1 || ':%' LIMIT 1;`, [base])).rows.length > 0;
 }
 
 export async function updateResult(orgId: number, id: number, values: ResultValues) {

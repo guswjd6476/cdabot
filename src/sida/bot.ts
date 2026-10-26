@@ -322,28 +322,17 @@ const HINTS: Partial<Record<R.FieldKey, string>> = {
 const formFields = (f: { form?: R.FormKind }) => (f.form ? R.FORMS[f.form].fields : []);
 const FORM_GUIDE = `<code>${R.FORMS.dig.template}</code>\n<code>${R.FORMS.find.template}</code>`;
 
-async function startResult(ctx: Ctx, a: A, init?: R.ParsedForm & { dedupKey: string }) {
-    const values = init?.values ?? {};
+async function startResult(ctx: Ctx, a: A) {
     const f: ResultFlow = {
         kind: 'result',
         chatId: ctx.chat.id,
         orgId: a.org.id,
         date: today(),
-        form: init?.kind,
-        values,
-        queue: init ? R.FORMS[init.kind].fields.filter((k) => values[k] === undefined && !R.OPTIONAL_FIELDS.includes(k)) : [],
-        dedupKey: init?.dedupKey ?? `f:${a.userId}:${Date.now()}:${Math.random().toString(36).slice(2, 8)}`,
+        values: {},
+        queue: [],
+        dedupKey: `f:${a.userId}:${Date.now()}:${Math.random().toString(36).slice(2, 8)}`,
     };
     (await session(ctx)).flow = f;
-    if (init) {
-        const got = formFields(f).filter((k) => values[k]).map((k) => `• ${R.fieldLabel(k)}: ${e(values[k])}`);
-        await ctx.reply(
-            `🧾 <b>자동 정리 결과 — ${R.FORMS[init.kind].label}</b>\n${got.join('\n') || '(인식된 값 없음)'}` +
-                (init.notes.length ? `\n\n${init.notes.map((n) => `⚠️ ${e(n)}`).join('\n')}` : '') +
-                (f.queue.length ? `\n\n빠졌거나 확인이 필요한 항목만 이어서 여쭤볼게요: ${f.queue.map(R.fieldLabel).join(', ')}` : ''),
-            { parse_mode: 'HTML' }
-        );
-    }
     await askNext(ctx, f);
 }
 
@@ -519,7 +508,7 @@ async function handleWeekText(ctx: Ctx, text: string) {
     await show(ctx, `✅ <b>활동 가능 시간 ${existing ? '수정' : '제출'} 완료</b> (${weekLabel(p.week_start)})\n\n${renderPersonWeek(p.week_start, days, Number(settings.min_minutes) || T.DEFAULT_MIN_MINUTES)}${note}`);
 }
 
-// 단체방에 '발/…' 또는 '찾/…' 양식. 한 건이면 자동 정리 후 빠지거나 틀린 칸만 질문, 여러 건이면 바로 저장
+// 단체방에 '발/…' 또는 '찾/…' 양식. 줄마다 바로 저장, 확인할 게 있을 때만 답장
 async function handleFreeForm(ctx: Ctx, text: string): Promise<boolean> {
     const forms = R.parseSlashForms(text);
     if (!forms.length) return false;
@@ -536,8 +525,8 @@ async function handleFreeForm(ctx: Ctx, text: string): Promise<boolean> {
         return true;
     }
     const opts = await S.listOptions(a.org.id);
-    // 칸별 검증. 여러 건을 한 번에 올리면 다시 묻지 않으므로 형식이 안 맞는 값도 입력 그대로 두고 확인 필요로 표시
-    const clean = (form: R.ParsedForm, keepRaw: boolean) => {
+    // 칸별 검증. 다시 묻지 않으므로 형식이 안 맞는 값도 입력 그대로 두고 확인 필요로 표시
+    const clean = (form: R.ParsedForm) => {
         const values: R.ResultValues = {};
         const notes = [...form.notes];
         for (const k of R.FORMS[form.kind].fields) {
@@ -546,8 +535,8 @@ async function handleFreeForm(ctx: Ctx, text: string): Promise<boolean> {
             const r = R.validateField(k, raw, k === 'age_group' ? [] : opts[k] || []);
             if (r.ok) values[k] = r.value;
             else {
-                notes.push(keepRaw ? `${R.fieldLabel(k)} 형식 확인` : `${R.fieldLabel(k)}: ${r.reason}`);
-                if (keepRaw) values[k] = raw;
+                notes.push(`${R.fieldLabel(k)} 형식 확인`);
+                values[k] = raw;
             }
         }
         return { kind: form.kind, values, notes };
@@ -558,28 +547,15 @@ async function handleFreeForm(ctx: Ctx, text: string): Promise<boolean> {
         return v.name && digits ? { name: v.name, digits } : null;
     };
     const base = `m:${ctx.chat.id}:${ctx.message.message_id}`;
+    if (await S.messageSaved(base)) return true; // 같은 메시지가 다시 들어온 경우 (텔레그램 재전송)
 
-    if (forms.length === 1) {
-        if (await S.resultExists(base)) {
-            await ctx.reply('ℹ️ 이 메시지는 이미 저장되었습니다.');
-            return true;
-        }
-        const one = clean(forms[0], false);
-        const p = who(one.kind, forms[0].values); // 형식이 틀린 값도 입력 그대로 비교
-        if (p && (await S.isDuplicateResult(a.org.id, one.kind, p.name, p.digits))) {
-            await ctx.reply(`⏭ 이미 등록된 ${R.FORMS[one.kind].label}입니다 (${one.kind === 'dig' ? '이름·연락처 뒷자리' : '이름·생년월일'} 같음). 저장하지 않았습니다.`);
-            return true;
-        }
-        await startResult(ctx, a as A, { ...one, dedupKey: base });
-        return true;
-    }
-
-    // 여러 건: 줄마다 바로 저장, 이미 있는 사람(또는 같은 메시지 안 중복)은 빼고
+    // 줄마다 바로 저장, 이미 있는 사람(또는 같은 메시지 안 중복)은 빼고
     const saved: string[] = [];
     const skipped: string[] = [];
+    const warned: string[] = [];
     const seen = new Set<string>();
     for (const [i, form] of forms.entries()) {
-        const one = clean(form, true);
+        const one = clean(form);
         const p = who(one.kind, form.values);
         const label = `${i + 1}번째 줄 ${e(one.values.name || '(이름 없음)')}`;
         const key = p && `${one.kind}|${p.name}|${p.digits}`;
@@ -593,13 +569,19 @@ async function handleFreeForm(ctx: Ctx, text: string): Promise<boolean> {
         await audit(a.org.id, a.userId, 'result.create', id, { kind: one.kind, bulk: true });
         const empty = R.missingCount({ kind: one.kind, ...one.values });
         const extra = [...one.notes, ...(empty ? [`빈 칸 ${empty}개`] : [])];
-        saved.push(`#${id} ${R.FORMS[one.kind].label} ${label}${extra.length ? ` — ⚠️ ${e(extra.join(', '))}` : ''}`);
+        saved.push(`#${id} ${R.FORMS[one.kind].label} ${label}`);
+        if (extra.length) warned.push(`#${id} ${label} — ⚠️ ${e(extra.join(', '))}`);
     }
     if (saved.length) await touchBoard(ctx, a.org.id);
+    // 문제없이 저장되면 답장 대신 👍 반응만 (현황은 결과 공유방 현황판에 반영됨). 확인할 게 있을 때만 답장
+    if (!warned.length && !skipped.length) {
+        if (saved.length) await ctx.react('👍').catch(() => {});
+        return true;
+    }
     await ctx.reply(
-        `✅ <b>결과 ${saved.length}건 저장</b>${saved.length ? `\n${saved.join('\n')}` : ''}` +
-            (skipped.length ? `\n\n⏭ <b>중복 제외 ${skipped.length}건</b> (이미 등록된 사람)\n${skipped.join('\n')}` : '') +
-            (saved.some((x) => x.includes('⚠️')) ? '\n\n빈 칸·형식 확인은 <code>/특전대 내결과</code> 에서 고칠 수 있습니다.' : ''),
+        `✅ <b>결과 ${saved.length}건 저장</b>` +
+            (warned.length ? `\n\n⚠️ <b>확인 필요 ${warned.length}건</b>\n${warned.join('\n')}\n고치기: <code>/특전대 내결과</code>` : '') +
+            (skipped.length ? `\n\n⏭ <b>중복 제외 ${skipped.length}건</b> (이미 등록된 사람)\n${skipped.join('\n')}` : ''),
         { parse_mode: 'HTML' }
     );
     return true;
@@ -1420,7 +1402,7 @@ export function registerSida(bot: Telegraf<any>) {
             const s = await session(ctx);
             const fresh = inPrivate(ctx) || Date.now() - (s.flow?.at || 0) < FLOW_TTL_MS;
             const f = s.flow?.chatId === ctx.chat.id && fresh ? s.flow : undefined;
-            // 입력 중이라도 결과 양식 전체를 붙여넣으면 자동 정리로 시작 (시간 구간 '09:00~12:00' 은 양식 줄로 인식되지 않음)
+            // 입력 중이라도 결과 양식을 붙여넣으면 바로 저장 (시간 구간 '09:00~12:00' 은 양식 줄로 인식되지 않음)
             if (await handleFreeForm(ctx, text)) return;
             // 단체방에서는 봇 질문에 답장한 메시지만 입력으로 받음 (일반 대화에 반응하지 않도록)
             const toBot = inPrivate(ctx) || ctx.message.reply_to_message?.from?.id === ctx.botInfo?.id;

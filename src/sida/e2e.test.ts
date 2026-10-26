@@ -195,15 +195,13 @@ test('한 메시지로 일주일 활동 시간 입력 — 적은 요일만 반�
     await S.saveSubmission(p.id, await uid(211), {}); // 이후 테스트 기준(대원11 미제출) 유지
 });
 
-test('[8][9][11] 발굴건·찾기건 한 줄 양식 — 자동 정리, 빠진 칸만 질문, 중복 방지', async () => {
+test('[8][9][11] 발굴건·찾기건 한 줄 양식 — 바로 저장, 문제 있을 때만 답장, 중복 방지', async () => {
     const form = '❗️발굴건\n발/홍길동/01012345678/20대 중/남/서울/1팀/김철수/전단지/+10.28 19시,강남역';
-    const r1 = await send(101, form, 5000);
-    assert.match(r1, /자동 정리 결과 — 발굴건[\s\S]*연락처: 010-1234-5678/);
-    assert.match(r1, /10\. 2차 만남 장소: 강남역/);
-    assert.match(r1, /결과 확인/);
-    assert.match(await press(101, 'sd:rs:ok'), /발굴건 결과 #\d+ 저장 완료/);
-    assert.match(await send(101, form, 5000), /이미 저장/); // 같은 메시지 재처리
-    assert.match(await press(101, 'sd:rs:ok'), /진행 중인 입력이 없습니다/); // 확인 버튼 두 번
+    assert.equal(await send(101, form, 5000), ''); // 문제없으면 답장 없이 저장
+    assert.ok(calls.some((c) => c.method === 'setMessageReaction' && c.payload.message_id === 5000)); // 👍 반응만
+    const [r1] = await S.listResults(1);
+    assert.deepEqual([r1.phone, r1.meet_at, r1.meet_place], ['010-1234-5678', '10.28 19시', '강남역']);
+    assert.equal(await send(101, form, 5000), ''); // 같은 메시지 재처리
     assert.equal((await S.listResults(1)).length, 1);
 
     // 여러 건 한 번에: 줄마다 바로 저장, 이미 등록된 사람·같은 메시지 안 중복은 제외
@@ -214,7 +212,7 @@ test('[8][9][11] 발굴건·찾기건 한 줄 양식 — 자동 정리, 빠진 �
         5100
     );
     assert.match(bulk, /결과 3건 저장/);
-    assert.match(bulk, /#\d+ 발굴건 1번째 줄 테스트\n/); // 연락처 뒷자리 4자리 OK, 2차 만남은 없어도 빈 칸 아님
+    assert.doesNotMatch(bulk, /확인 필요/); // 연락처 뒷자리 4자리 OK, 2차 만남은 없어도 빈 칸 아님
     assert.match(bulk, /중복 제외 2건[\s\S]*4번째 줄 홍길동\n5번째 줄 테스트2/);
     const added: S.ResultRow[] = (await S.listResults(1)).filter((r) => r.name?.startsWith('테스트'));
     assert.deepEqual(added.map((r) => [r.name, r.phone, r.age_group, r.tool]).sort(), [
@@ -222,38 +220,27 @@ test('[8][9][11] 발굴건·찾기건 한 줄 양식 — 자동 정리, 빠진 �
         ['테스트2', '2234', '20대 초', '노방'],
         ['테스트3', '4234', '20대 초', '노방'],
     ]);
-    assert.match(await send(101, '발/테스트/1234/20대초'), /이미 등록된 발굴건/); // 한 건짜리도 중복이면 저장 안 함
-    assert.match(await send(101, '발/테스트3/010-5555-4234\n발/테스트3/9999'), /결과 1건 저장[\s\S]*2번째 줄 테스트3[\s\S]*중복 제외 1건[\s\S]*1번째 줄/); // 전체 번호여도 뒷자리로 비교
+    assert.match(await send(101, '발/테스트/1234/20대초'), /결과 0건 저장[\s\S]*중복 제외 1건/); // 한 건짜리도 중복이면 저장 안 함
+    assert.match(await send(101, '발/테스트3/010-5555-4234\n발/테스트3/9999'), /결과 1건 저장[\s\S]*확인 필요 1건[\s\S]*2번째 줄 테스트3[\s\S]*중복 제외 1건\D*1번째 줄/); // 전체 번호여도 뒷자리로 비교
     for (const r of (await S.listResults(1)).filter((x) => x.phone === '9999')) added.push(r);
     assert.match(await send(101, '발/테스트/1234\n발/테스트3/4234'), /결과 0건 저장[\s\S]*중복 제외 2건/); // 다시 올려도 안 늘어남
     for (const r of added) await S.deleteResult(1, r.id); // 아래 건수 검증에 영향 없게
 
     const r2 = await send(101, '발/김영희//25살/여/부산');
-    assert.match(r2, /생년 구분은 .* 중에서 선택/); // 허용 밖 값은 확인
-    assert.match(r2, /연락처, 생년 구분, 인도팀, 인도자, 도구$/m); // 빠진 칸만 (추측 없음, 2차 만남은 선택이라 안 물음)
-    assert.equal(await send(101, '점심 뭐 먹지'), ''); // 입력 중이라도 답장 아닌 일반 대화엔 반응 안 함
-    assert.match(await answer(101, '12'), /연락처 형식을 확인/);
-    assert.match(await answer(101, '010-2222-3333'), /생년 구분/);
-    assert.match(await press(101, 'sd:rs:pick:1'), /인도팀/);
-    await press(101, 'sd:rs:skip');
-    await press(101, 'sd:rs:skip');
-    const review = await answer(101, '책자');
-    assert.match(review, /3\. 생년 구분: 20대 중/);
-    assert.match(review, /6\. 인도팀: <i>\(미입력\)<\/i>/);
-    await press(101, 'sd:rs:ok');
+    assert.match(r2, /확인 필요 1건<\/b>\n#\d+ 1번째 줄 김영희 — ⚠️ 생년 구분 형식 확인, 빈 칸 4개/); // 형식 틀린 값은 그대로 두고 알림
     const [second] = await S.listResults(1);
-    assert.deepEqual([second.kind, second.phone, second.age_group, second.team, second.tool], ['dig', '010-2222-3333', '20대 중', null, '책자']);
+    assert.deepEqual([second.name, second.age_group, second.phone], ['김영희', '25살', null]);
+    await S.updateResult(1, second.id, { ...second, phone: '010-2222-3333', age_group: '20대 중', tool: '책자' }); // 아래 보고서 검증용 값
 
     // 찾기건
-    const r3 = await send(101, '찾/이몽룡/990315/대전/3팀/성춘향/11월');
-    assert.match(r3, /찾기건[\s\S]*2\. 생년월일: 990315[\s\S]*6\. 목표월: 11월/);
-    await press(101, 'sd:rs:ok');
+    assert.equal(await send(101, '찾/이몽룡/990315/대전/3팀/성춘향/11월'), '');
     const [find] = await S.listResults(1);
     assert.deepEqual([find.kind, find.birth_date, find.target_month, find.phone], ['find', '990315', '11월', null]);
 
     // 단계별 입력 (양식 고르기 → 칸마다 질문)
     assert.match(await send(101, '/특전대 결과'), /어떤 결과인가요/);
     assert.match(await press(101, 'sd:rs:form:dig'), /발굴건<\/b> \[1\/10\][\s\S]*이름/);
+    assert.equal(await send(101, '점심 뭐 먹지'), ''); // 입력 중이라도 답장 아닌 일반 대화엔 반응 안 함
     for (const v of ['박영수', '010-3333-4444']) await answer(101, v);
     await press(101, 'sd:rs:pick:4'); // 모름
     await press(101, 'sd:rs:pick:0'); // 성별 목록 첫 값
@@ -338,8 +325,7 @@ test('단체방(대원) / 1:1 대화(관리자) — 장소 안내, 남의 버튼
     assert.match(await press(205, 'sd:rs:cx~205'), /취소/);
 
     // 단체방 자유 형식 결과 → 저장
-    assert.match(await send(205, '발/방철수/010-5555-6666/30대/남/광주/3팀/김/책/10.31 14시,광주역'), /결과 확인/);
-    assert.match(await press(205, 'sd:rs:ok~205'), /저장 완료/);
+    assert.equal(await send(205, '발/방철수/010-5555-6666/30대/남/광주/3팀/김/책/10.31 14시,광주역'), '');
     const mine = await send(205, '/특전대 내결과');
     assert.match(mine, /내 결과<\/b> 최근 7일 — 총 \d+건 \(발 \d+건 \(답장온 1 · 답장 안온 \d+\) · 찾 \d+건\)\n\n<b>\d+\/\d+ \(.\)<\/b> 발 \d+건 \(답장온 1 · 답장 안온 \d+\) · 찾 \d+건\n#\d+ 발\/방철수\/010-5555-6666\/30대\/남\/광주\/3팀\/김\/책\/\+10\.31 14시,광주역/);
 
@@ -571,7 +557,11 @@ test('결과 주제 — 지정한 주제에서만 발/찾 받음', async () => {
     assert.match(await inTopic(ADMIN, '/특전대 결과주제', 7), /이 주제에서만/);
     assert.equal(await inTopic(101, '발/주제밖/010-1111-9999', 9), ''); // 다른 주제는 무시
     assert.equal(await inTopic(101, '발/주제밖/010-1111-9999'), '');
-    assert.match(await inTopic(101, '발/주제안/010-1111-9998', 7), /자동 정리 결과/);
+    const names = async () => (await S.listResults(1)).map((r) => r.name);
+    assert.ok(!(await names()).includes('주제밖'));
+    assert.match(await inTopic(101, '발/주제안/010-1111-9998', 7), /확인 필요/); // 빈 칸이 있어 알림
+    assert.ok((await names()).includes('주제안'));
     assert.match(await inTopic(ADMIN, '/특전대 결과주제 해제', 7), /해제/);
-    assert.notEqual(await inTopic(101, '발/주제밖/010-1111-9999', 9), '');
+    await inTopic(101, '발/주제밖/010-1111-9999', 9);
+    assert.ok((await names()).includes('주제밖')); // 해제 후엔 어느 주제든 받음
 });
