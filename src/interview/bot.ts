@@ -116,6 +116,8 @@ async function handleSheet(ctx: Ctx, text: string): Promise<boolean> {
         ['행정에서 못 찾음', st.filter((x) => !x.student_id && x.match_note === 'none')],
         ['행정에 같은 이름 여러 명', st.filter((x) => x.match_note === 'multi')],
     ].filter(([, xs]) => xs.length) as [string, { name: string }[]][];
+    // 특전대 주차면 바로 특전대 결과로 등록 → 현황판에 반영
+    const sida = (await inSidaWeek(a.org!.id, date)) ? await toSida(ctx, a as A, date, kind) : null;
     const checkText = checks.length
         ? `\n\n⚠️ <b>확인 필요</b> (후속 X 제외)\n${checks.map(([t, xs]) => `• ${t}: ${names(xs)}`).join('\n')}\n<i>인도자 이름이 행정과 같아야 연결됩니다. 고쳐서 다시 보내면 덮어씁니다.</i>`
         : '';
@@ -124,15 +126,17 @@ async function handleSheet(ctx: Ctx, text: string): Promise<boolean> {
             `\n<i>구분이 틀리면 맨 위에 "구분: ${kind === '향수행사' ? '당터뷰' : '향수행사'}" 줄을 넣어 다시 보내주세요.</i>` +
             (!dateLine && !group ? '\n💡 지난 날짜 결과면 맨 위에 "날짜: 10.20" 줄을 넣어 다시 보내주세요 (같은 날짜·이름은 덮어씀).' : '') +
             checkText +
-            (r.linkError ? '\n⚠️ 행정 DB를 읽지 못해 행정 연결은 나중에 다시 시도합니다.' : ''),
-        { parse_mode: 'HTML', ...(hasPerm(a, 'manager') && (await inSidaWeek(a.org!.id, date)) ? Markup.inlineKeyboard([[btn('🪖 특전대 결과로 등록', `iv:sd:p:${date}:${KIND_CODE[kind]}`)]]) : {}) }
+            (r.linkError ? '\n⚠️ 행정 DB를 읽지 못해 행정 연결은 나중에 다시 시도합니다.' : '') +
+            (sida ? `\n\n${sidaSummary(date, kind, sida)}` : ''),
+        { parse_mode: 'HTML' }
     );
     return true;
 }
 
 /* ====================== 특전대 결과로 등록 ====================== */
-// 인터뷰한 사람은 모두 발굴건, 후속연결 O 는 찾기건도. 미리보기 → 확인 후 등록
-// 실적 대원: 특전대 대원 중 인도자와 같은 이름(한 명일 때), 없으면 등록 누른 사람
+// 인터뷰한 사람은 모두 발굴건, 후속연결 O 는 찾기건도. 특전대 주차에 결과지를 올리면 자동 등록,
+//   '/인터뷰 특전대' 는 미리보기 → 확인 후 등록 (대원 이름을 고친 뒤 다시 넣을 때)
+// 실적 대원: 특전대 대원 중 인도자와 같은 이름(한 명일 때), 없으면 등록하지 않음
 
 const KIND_CODE: Record<InterviewKind, string> = { 향수행사: 'h', 당터뷰: 'd' };
 const kindOfCode = (c: string): InterviewKind | undefined => (c === 'h' ? '향수행사' : c === 'd' ? '당터뷰' : undefined);
@@ -207,6 +211,18 @@ async function sidaPreview(ctx: Ctx, a: A, args: string, given?: { date: string;
 
 async function sidaRegister(ctx: Ctx, a: A, date: string, kind?: InterviewKind) {
     if (!(await inSidaWeek(a.org.id, date))) return void (await ctx.reply(NOT_SIDA_WEEK));
+    await ctx.reply(sidaSummary(date, kind, await toSida(ctx, a, date, kind)), { parse_mode: 'HTML' });
+}
+
+function sidaSummary(date: string, kind: InterviewKind | undefined, x: { created: number; dups: string[]; unmatched: string[] }) {
+    return (
+        `🪖 ${md(date)}${kindTitle(kind)} 특전대 결과 ${x.created}건 등록 (현황판 반영)` +
+        (x.dups.length ? `\n⏭ 이미 특전대에 있는 사람 ${x.dups.length}건 제외: ${x.dups.join(', ')}` : '') +
+        (x.unmatched.length ? `\n⏭ 인도자와 같은 이름의 특전대 대원이 없어 제외 ${x.unmatched.length}명: ${e(x.unmatched.join(', '))}` : '')
+    );
+}
+
+async function toSida(ctx: Ctx, a: A, date: string, kind?: InterviewKind) {
     const p = await sidaPlan(a, date, kind);
     let created = 0;
     const dups: string[] = [];
@@ -220,11 +236,7 @@ async function sidaRegister(ctx: Ctx, a: A, date: string, kind?: InterviewKind) 
     }
     await audit(a.org.id, a.userId, 'interview.to_sida', date, { created, kind: kind ?? null });
     if (created) await refreshBoard(ctx.telegram, a.org.id).catch((err) => console.error('[현황판 갱신 실패]:', err));
-    await ctx.reply(
-        `✅ ${md(date)}${kindTitle(kind)} 특전대 결과 ${created}건 등록` +
-            (dups.length ? `\n⏭ 이미 특전대에 있는 사람 ${dups.length}건 제외: ${dups.join(', ')}` : ''),
-        { parse_mode: 'HTML' }
-    );
+    return { created, dups, unmatched: p.unmatched };
 }
 
 /* ====================== 추적 화면 (관리자 1:1) ====================== */

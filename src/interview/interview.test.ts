@@ -334,37 +334,34 @@ test('특전대 양식으로 바꾸기 — 모두 발굴, 후속 O 는 찾기도
     assert.deepEqual(meetOf('평일12시전,노원거주/20살'), { at: '평일12시전', place: '노원거주' });
 });
 
-test('/인터뷰 특전대 — 미리보기 → 등록, 인도자와 같은 이름 대원 실적, 두 번 등록 안 됨', async () => {
+test('/인터뷰 특전대 — 특전대 주차면 결과지 올릴 때 자동 등록(현황판 반영), 인도자와 같은 이름 대원 실적, 두 번 등록 안 됨', async () => {
     const u = await upsertUser(4242, '양하늘');
     await upsertMembership(1, u.id, 'sida', '양하늘', 'active');
     const sheet = `날짜: 2026.10.2\n구분: 향수행사\n▪️후속연결O\n#이가온/성북/양하늘/손바람/10.30(금),노원/07.10.12, 010-1234-0001\n▪️후속연결X\n#김건모/노원/문별/황금새/남 22살`;
-    await send(ADMIN, sheet);
-    assert.ok(!labelsOf('').includes('🪖 특전대 결과로 등록')); // 특전대 주차가 없으면 버튼 없음
+    assert.doesNotMatch(await send(ADMIN, sheet), /특전대/); // 특전대 주차가 없으면 등록 안 함
     assert.match(await send(ADMIN, '/인터뷰 특전대 2026.10.2'), /특전대 기간\(주차\)이 아닌/);
     await createPeriod(1, '2026-09-28'); // 10.2(금)가 든 주차
     const saved = await send(ADMIN, sheet);
-    assert.ok(labelsOf('').includes('🪖 특전대 결과로 등록'));
-    const btnData = calls.flatMap((c) => c.payload?.reply_markup?.inline_keyboard?.flat() ?? []).find((b: any) => b.text.startsWith('🪖')).callback_data;
     assert.match(saved, /2명 저장/);
-    const press = async (data: string) => {
-        calls = [];
-        await bot.handleUpdate({ update_id: ++n, callback_query: { id: String(n), from: { id: ADMIN, is_bot: false, first_name: 'A' }, chat_instance: 'x', data, message: { message_id: 1, date: 0, chat: { id: ADMIN, type: 'private' }, text: '.' } } } as any);
-        return calls.filter((c) => c.method === 'sendMessage').map((c) => c.payload.text).join('\n---\n');
-    };
-    const pv = await press(btnData);
-    assert.match(pv, /발굴 1건 · 찾기 1건/);
-    assert.match(pv, /발\/이가온\/0001\/20대 초\/\/성북\/1\/양하늘\/당터뷰\/\+10\.30\(금\),노원\n  → 대원 양하늘/); // 행정 members 의 인도자 지역, 팀은 구역 '1-1' 의 앞자리
-    assert.match(pv, /찾\/이가온\/071012\/성북\/1\/양하늘 *\n/);
-    assert.match(pv, /제외 1명: 김건모\(문별\)/); // 인도자 이름의 대원이 없으면 등록 안 함
-    const okData = calls.flatMap((c) => c.payload?.reply_markup?.inline_keyboard?.flat() ?? []).find((b: any) => b.text.startsWith('✅')).callback_data;
-    assert.match(await press(okData), /특전대 결과 2건 등록/);
-    const rs = (await query(`SELECT r.kind, r.name, r.meet_at, u.telegram_id::text AS tg FROM cdabot_results r JOIN cdabot_users u ON u.id = r.user_id WHERE r.activity_date = '2026-10-02' ORDER BY r.name DESC, r.kind`)).rows;
-    assert.deepEqual(rs.map((r) => [r.kind, r.name, r.meet_at, r.tg]), [
-        ['dig', '이가온', '10.30(금)', '4242'],
-        ['find', '이가온', null, '4242'],
+    assert.match(saved, /🪖 10\/2 \[향수행사\] 특전대 결과 2건 등록 \(현황판 반영\)/);
+    assert.match(saved, /제외 1명: 김건모\(문별\)/); // 인도자 이름의 대원이 없으면 등록 안 함
+    const rs = (await query(`SELECT r.kind, r.name, r.meet_at, r.team, u.telegram_id::text AS tg FROM cdabot_results r JOIN cdabot_users u ON u.id = r.user_id WHERE r.activity_date = '2026-10-02' ORDER BY r.kind`)).rows;
+    assert.deepEqual(rs.map((r) => [r.kind, r.name, r.meet_at, r.team, r.tg]), [
+        ['dig', '이가온', '10.30(금)', '1', '4242'], // 팀은 행정 구역 '1-1' 의 앞자리
+        ['find', '이가온', null, '1', '4242'],
     ]);
-    assert.match(await press(okData), /0건 등록/); // 다시 눌러도 안 늘어남
-    assert.match(await press(btnData), /등록할 사람이 없습니다. \(이미 등록 2건\)[\s\S]*김건모/);
+    assert.match(await send(ADMIN, sheet), /특전대 결과 0건 등록/); // 다시 올려도 안 늘어남
+
+    // 수동: 미리보기 → 등록 (대원 이름을 맞춘 뒤 빠진 사람 넣기)
+    const u2 = await upsertUser(4343, '문별');
+    await upsertMembership(1, u2.id, 'sida', '문별', 'active');
+    const pv = await send(ADMIN, '/인터뷰 특전대 2026.10.2');
+    assert.match(pv, /발굴 1건 · 찾기 0건 · 이미 등록 2건 제외/);
+    assert.match(pv, /발\/김건모\/\/20대 초\/남\/노원\/3\/문별\/당터뷰\n  → 대원 문별/);
+    const okData = calls.flatMap((c) => c.payload?.reply_markup?.inline_keyboard?.flat() ?? []).find((b: any) => b.text.startsWith('✅')).callback_data;
+    calls = [];
+    await bot.handleUpdate({ update_id: ++n, callback_query: { id: String(n), from: { id: ADMIN, is_bot: false, first_name: 'A' }, chat_instance: 'x', data: okData, message: { message_id: 1, date: 0, chat: { id: ADMIN, type: 'private' }, text: '.' } } } as any);
+    assert.match(calls.filter((c) => c.method === 'sendMessage').map((c) => c.payload.text).join('\n'), /특전대 결과 1건 등록/);
 });
 
 test('보관기간 지나면 이름·연락처·메모 삭제, 건수는 유지', async () => {
