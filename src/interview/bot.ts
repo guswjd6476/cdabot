@@ -217,7 +217,8 @@ async function sidaRegister(ctx: Ctx, a: A, date: string, kind?: InterviewKind) 
     await audit(a.org.id, a.userId, 'interview.to_sida', date, { created, kind: kind ?? null });
     if (created) await refreshBoard(ctx.telegram, a.org.id).catch((err) => console.error('[현황판 갱신 실패]:', err));
     await ctx.reply(
-        `✅ ${md(date)}${kindTitle(kind)} 특전대 결과 ${created}건 등록` + (dups.length ? `\n⏭ 이미 특전대에 있는 사람 ${dups.length}건 제외: ${dups.join(', ')}` : ''),
+        `✅ ${md(date)}${kindTitle(kind)} 특전대 결과 ${created}건 등록` +
+            (dups.length ? `\n⏭ 이미 특전대에 있는 사람 ${dups.length}건 제외: ${dups.join(', ')}` : ''),
         { parse_mode: 'HTML' }
     );
 }

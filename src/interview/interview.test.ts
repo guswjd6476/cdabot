@@ -293,12 +293,12 @@ test('특전대 양식으로 바꾸기 — 모두 발굴, 후속 O 는 찾기도
     assert.deepEqual(forms.map((f) => f.kind), ['dig', 'find']);
     assert.deepEqual(forms[0].values, {
         name: '이가온', region: '성북구', team: '1-1', guide: '양하늘', phone: '0001', // 뒷자리만
-        age_group: '20대 초', tool: '향수행사', meet_at: '10.30(금) 시간대 상관없음', meet_place: '노원',
+        age_group: '20대 초', tool: '당터뷰', meet_at: '10.30(금) 시간대 상관없음', meet_place: '노원',
     });
     assert.deepEqual(forms[1].values, { name: '이가온', region: '성북구', team: '1-1', guide: '양하늘', birth_date: '071012' });
     const xf = interviewToForms(toRow(x), undefined, 2026);
     assert.deepEqual(xf.map((f) => f.kind), ['dig']); // 후속 X 는 발굴만, 2차 만남 없음(답장 안온)
-    assert.deepEqual(xf[0].values, { name: '김건모', age_group: '20대 초', gender: '남', tool: '향수행사' }); // '?' 지역은 빈 칸
+    assert.deepEqual(xf[0].values, { name: '김건모', age_group: '20대 초', gender: '남', tool: '당터뷰' }); // '?' 지역은 빈 칸
     assert.equal(birth6(null, '05년생3.9생일, 010-2222-3333'), '050309');
     assert.equal(birth6(null, '10.30 노원'), null);
     assert.equal(ageGroup('24살 남성', null, 2026), '20대 중');
@@ -327,9 +327,9 @@ test('/인터뷰 특전대 — 미리보기 → 등록, 인도자와 같은 이�
     };
     const pv = await press(btnData);
     assert.match(pv, /발굴 2건 · 찾기 1건/);
-    assert.match(pv, /발\/이가온\/0001\/20대 초\/\/성북\/1-1\/양하늘\/향수행사\/\+10\.30\(금\),노원\n  → 대원 양하늘/); // 행정 members 의 인도자 지역·구역
-    assert.match(pv, /찾\/이가온\/071012\/성북\/1-1\/양하늘 *\n/);
-    assert.match(pv, /발\/김건모\/\/20대 초\/남\/노원\/3-1\/문별\/향수행사\n  → 대원 \(매칭 안 됨/);
+    assert.match(pv, /발\/이가온\/0001\/20대 초\/\/성북\/1\/양하늘\/당터뷰\/\+10\.30\(금\),노원\n  → 대원 양하늘/); // 행정 members 의 인도자 지역, 팀은 구역 '1-1' 의 앞자리
+    assert.match(pv, /찾\/이가온\/071012\/성북\/1\/양하늘 *\n/);
+    assert.match(pv, /발\/김건모\/\/20대 초\/남\/노원\/3\/문별\/당터뷰\n  → 대원 \(매칭 안 됨/);
     const okData = calls.flatMap((c) => c.payload?.reply_markup?.inline_keyboard?.flat() ?? []).find((b: any) => b.text.startsWith('✅')).callback_data;
     assert.match(await press(okData), /특전대 결과 3건 등록/);
     const rs = (await query(`SELECT r.kind, r.name, r.meet_at, u.telegram_id::text AS tg FROM cdabot_results r JOIN cdabot_users u ON u.id = r.user_id WHERE r.activity_date = '2026-10-02' ORDER BY r.name DESC, r.kind`)).rows;

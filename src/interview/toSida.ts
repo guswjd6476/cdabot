@@ -1,7 +1,7 @@
 // 인터뷰 결과 → 특전대 결과 양식 (순수 함수). 인터뷰한 사람은 모두 발굴건, 후속연결 O 는 찾기건도
-//   인도지역·인도팀은 행정 members 의 인도자 지역·구역, 없으면 결과지의 지역 칸
+//   인도지역·인도팀은 행정 members 의 인도자 지역·팀(구역 앞자리), 없으면 결과지의 지역 칸
 import { ParsedForm, ResultValues } from '../sida/result';
-import { FollowUp, InterviewKind } from './parse';
+import { FollowUp } from './parse';
 
 export interface GuideInfo {
     region: string | null;
@@ -15,7 +15,6 @@ export interface InterviewLike {
     phone: string | null;
     birth_date: string | null;
     memo: string | null;
-    kind: InterviewKind;
 }
 
 const PHONE = /01[016789][-\s.]?\d{3,4}[-\s.]?\d{4}/g;
@@ -78,7 +77,7 @@ export function interviewToForms(r: InterviewLike, guide: GuideInfo | undefined,
                 phone: r.phone?.replace(/\D/g, '').slice(-4),
                 age_group: ageGroup(memo, b6, nowYear),
                 gender: genderOf(memo),
-                tool: r.kind,
+                tool: '당터뷰', // 도구는 향수행사·당터뷰 모두 '당터뷰'
                 meet_at: meet?.at,
                 meet_place: meet?.place,
             }),

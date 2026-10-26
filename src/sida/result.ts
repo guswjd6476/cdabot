@@ -45,8 +45,8 @@ export const AGE_GROUPS = ['20대 초', '20대 중', '20대 후', '30대', '모�
 // 관리자가 목록을 관리하는 항목 (gender 는 목록 밖 값이면 다시 확인, 나머지는 직접 입력 허용)
 export const OPTION_FIELDS: FieldKey[] = ['gender', 'region', 'team', 'guide', 'tool'];
 export const PII_FIELDS: FieldKey[] = ['name', 'phone', 'birth_date'];
-// 없는 경우가 많아 비어 있어도 '빈 칸'으로 세지 않고, 한 줄 양식에서 빠져도 다시 묻지 않음
-export const OPTIONAL_FIELDS: FieldKey[] = ['meet_at', 'meet_place'];
+// 없는 경우가 많아 비어 있어도 '빈 칸'으로 세지 않음 (성별은 인터뷰 결과지에 없음)
+export const OPTIONAL_FIELDS: FieldKey[] = ['meet_at', 'meet_place', 'gender'];
 
 const squash = (s: string) => s.normalize('NFKC').replace(/\s+/g, '');
 

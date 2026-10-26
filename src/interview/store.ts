@@ -44,9 +44,11 @@ export async function findStudent(e: { name: string; guides: string[]; region: s
     return rows.length === 1 ? { id: rows[0].id, note: null } : { id: null, note: rows.length ? 'multi' : 'none' };
 }
 
-// 인도자 이름 → 행정 members 의 지역·구역 (같은 이름이 한 명일 때만). 행정 DB를 못 읽으면 throw
+// 인도자 이름 → 행정 members 의 지역·팀 (같은 이름이 한 명일 때만). 팀은 구역 '1-2' 의 앞자리 '1'. 행정 DB를 못 읽으면 throw
 export async function guideInfo(names: string[]): Promise<Map<string, GuideInfo>> {
-    const rows = (await query(`SELECT "이름" AS name, "지역" AS region, "구역" AS team FROM members WHERE "이름" = ANY($1::text[]);`, [names])).rows;
+    const rows = (
+        await query(`SELECT "이름" AS name, "지역" AS region, NULLIF(split_part("구역", '-', 1), '') AS team FROM members WHERE "이름" = ANY($1::text[]);`, [names])
+    ).rows;
     const out = new Map<string, GuideInfo>();
     for (const n of names) {
         const hit = rows.filter((r) => r.name === n);
