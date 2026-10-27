@@ -117,6 +117,30 @@ test('새 양식 — 섭외자/성별/연락처/지역/인도자/인터뷰자/�
     assert.equal(dig.values.gender, '여');
 });
 
+test('최신 양식 — 섭외자/성별/생년월일/연락처/인도자지역/인도자/인터뷰자/다음 만남/간단정보', () => {
+    const xs = parseInterviewSheet(`▪️후속연결O
+#한별/여/030718/010-2222-3333/성북/양하늘/한솔/11.2(일),노원/대학생
+#새봄/남/-/4444/노원/문별/한솔/-/메모
+#하람/-/03.07.18/-/중랑/최바다/한솔
+#누리/-/-/-/-/-/한솔/-/관심 많음
+#이가온/남/010-1234-0001/성북/양하늘/손바람/-/직전 양식`);
+    assert.deepEqual(
+        xs.map((x) => [x.name, x.gender, x.birthDate, x.phone, x.region, x.guides.join(','), x.interviewer]),
+        [
+            ['한별', '여', '030718', '010-2222-3333', '성북', '양하늘', '한솔'],
+            ['새봄', '남', null, '4444', '노원', '문별', '한솔'],
+            ['하람', null, '030718', null, '중랑', '최바다', '한솔'],
+            ['누리', null, null, null, null, '', '한솔'],
+            ['이가온', '남', null, '010-1234-0001', '성북', '양하늘', '손바람'], // 생년월일 칸 없는 직전 양식
+        ]
+    );
+    assert.match(xs[0].memo, /^11\.2\(일\),노원\/대학생/);
+    const [dig, find] = interviewToForms({ ...xs[0], follow_up: 'O', birth_date: xs[0].birthDate }, undefined, 2026);
+    assert.equal(dig.values.age_group, '20대 중'); // 2003년생 → 24살
+    assert.equal(find.values.birth_date, '030718');
+    assert.equal(dig.values.meet_at, '11.2(일)');
+});
+
 test('구분 — 제목에 향수면 향수행사 (안내문의 "당터뷰" 단어는 무시), 아니면 당터뷰, "구분:" 줄 우선', () => {
     assert.equal(sheetKind(SHEET), '향수행사'); // 향수 양식 안에 '당터뷰어 필독'이 있어도
     assert.equal(sheetKind('📌 당터뷰 결과\n▪️후속연결O\n#김하나/성북/한솔/향수 좋아함'), '당터뷰'); // 메모 속 '향수'는 무시

@@ -489,7 +489,7 @@ async function removeInterview(ctx: Ctx, a: A, args: string) {
 async function registerGroup(ctx: Ctx, a: A) {
     await setGroupOrg(ctx.chat.id, MK, a.org.id, ctx.chat.title, a.userId);
     await audit(a.org.id, a.userId, 'interview.group.register', ctx.chat.id);
-    await ctx.reply(`✅ 이 방을 [${a.org.name}] 인터뷰 결과 방으로 등록했습니다.\n이제 이 방에 올리는 결과지(#섭외자/성별/연락처/지역/인도자/인터뷰자/…)는 자동 저장됩니다. (해제: /인터뷰 방해제)`);
+    await ctx.reply(`✅ 이 방을 [${a.org.name}] 인터뷰 결과 방으로 등록했습니다.\n이제 이 방에 올리는 결과지(#섭외자/성별/생년월일/연락처/인도자지역/인도자/인터뷰자/…)는 자동 저장됩니다. (해제: /인터뷰 방해제)`);
 }
 
 async function unregisterGroup(ctx: Ctx, a: A) {
@@ -527,7 +527,7 @@ const HELP =
     `<b>결과 올리기</b> (등록된 인터뷰 방 또는 봇과 1:1)\n지금 쓰는 결과지 그대로 올리면 사람별로 저장됩니다.\n` +
     `• 밀린 결과는 맨 위에 <code>날짜: 10.20</code> 줄을 넣어 봇에게 1:1로 보내면 그 날짜로 저장\n` +
     `• 제목에 '향수'가 있으면 <b>향수행사</b>, 없으면 <b>당터뷰</b>로 구분 (직접 지정: <code>구분: 향수행사</code>)\n` +
-    `<code>▪️후속연결O\n#섭외자/성별/연락처/지역/인도자/인터뷰자/다음 만남예정일, 장소/간단정보</code>\n• 연락처는 뒷자리만 써도 됨, 모르는 칸은 <code>-</code> (예전 양식 <code>#이름/지역/인도자/인터뷰자/메모</code>도 인식)\n` +
+    `<code>▪️후속연결O\n#섭외자/성별/생년월일/연락처/인도자지역/인도자/인터뷰자/다음 만남예정일, 장소/간단정보</code>\n• 생년월일은 6자리(030718), 연락처는 뒷자리만 써도 됨, 모르는 칸은 <code>-</code> (예전 양식 <code>#이름/지역/인도자/인터뷰자/메모</code>도 인식)\n` +
     `• <code>▪️후속연결O / 보류 / X</code> 아래 줄이 그 상태로 저장\n• 연락처·생년월일(<code>생년월일: 990315</code>)은 메모에서 자동 인식\n` +
     `• 같은 날 같은 이름을 다시 올리면 덮어씀 · 잘못 올린 사람은 <code>/인터뷰 삭제 9.12 이름</code> (올린 본인·관리자)\n\n` +
     `<b>관리자</b> (봇과 1:1) — 명령 뒤에 <code>향수</code> 또는 <code>당터뷰</code>를 붙이면 그 구분만 (예: <code>/인터뷰 단계 향수 10.1~10.24</code>)\n• <code>/인터뷰 현황 [10.1~10.24]</code> — 인터뷰 수, 행정 등록·단계, 인터뷰자별·지역별\n` +

@@ -1,5 +1,6 @@
 // 당일 인터뷰 결과지 (순수 함수). '▪️후속연결O/보류/X' 구간 아래 사람 줄을 정리
-//   새 양식: 섭외자/성별/연락처/지역/인도자/인터뷰자/다음 만남예정일, 장소/간단정보 (둘째 칸이 성별이면 새 양식)
+//   새 양식: 섭외자/성별/생년월일/연락처/인도자지역/인도자/인터뷰자/다음 만남예정일, 장소/간단정보 (둘째 칸이 성별이면 새 양식)
+//   잠깐 쓴 양식(생년월일 칸 없음): 섭외자/성별/연락처/지역/인도자/인터뷰자/… — 셋째 칸이 연락처면 이것으로 읽음
 //   예전 양식: 섭외자/지역/인도자/인터뷰자/다음 만남예정일, 장소/간단정보 (밀린 결과용으로 계속 읽음)
 //   칸 수가 사람마다 달라서 이름·후속 상태·연락처·생년월일만 확실히 뽑고 나머지는 메모 원문으로 둠
 
@@ -90,6 +91,7 @@ export function parseInterviewSheet(raw: string): InterviewEntry[] {
 // 새 양식: 둘째 칸이 성별(남·여·남자·여성), 또는 성별이 빈 칸('-')이면서 셋째 칸이 연락처 숫자이거나 칸이 7개 이상 (예전 양식은 보통 6칸 이하)
 const GENDER = /^(남|여)(자|성)?$/;
 const blank = (x?: string) => !x || EMPTY.test(x);
+const isPhone = (x?: string) => !!x && (/^01[016789][-\s.]?\d{3,4}[-\s.]?\d{4}$/.test(x) || /^\d{4}$/.test(x)); // 전체 번호 또는 뒷자리 4자리
 const isNewForm = (p: string[]) => GENDER.test(p[1] ?? '') || (blank(p[1]) && (/^[\d\s.\-]{4,}$/.test(p[2] ?? '') || p.length >= 7));
 
 function toEntry(head: string, more: string[], followUp: FollowUp | null): InterviewEntry {
@@ -98,19 +100,23 @@ function toEntry(head: string, more: string[], followUp: FollowUp | null): Inter
     const all = [head, ...more].join('\n');
     const names = (s?: string) => (s && !EMPTY.test(s) ? s.split(',').map((x) => x.trim()).filter(Boolean) : []);
     if (isNewForm(parts)) {
-        // 칸 위치가 정해져 있음: 이름/성별/연락처/지역/인도자/인터뷰자/다음 만남/간단정보
+        // 칸 위치가 정해져 있음: 이름/성별/생년월일/연락처/인도자지역/인도자/인터뷰자/다음 만남/간단정보
         const cell = (i: number) => (parts[i] && !EMPTY.test(parts[i]) && !/^[?？]+$/.test(parts[i]) ? parts[i] : null);
-        const phoneCell = cell(2);
+        // 생년월일 칸 없는 양식: 셋째 칸이 연락처, 또는 셋째 칸이 비고 넷째 칸이 지역(글자)
+        const noBirth = isPhone(parts[2]) || (blank(parts[2]) && !blank(parts[3]) && !isPhone(parts[3]) && /[가-힣]/.test(parts[3] ?? ''));
+        const o = noBirth ? 0 : 1;
+        const birthDigits = noBirth ? '' : (cell(2) ?? '').replace(/\D/g, '');
+        const phoneCell = cell(2 + o);
         return {
             name,
             followUp,
             gender: parts[1]?.match(GENDER)?.[1] ?? null,
             phone: (phoneCell && (findPhone(phoneCell) ?? (phoneCell.replace(/\D/g, '') || null))) ?? findPhone(all), // 뒷자리만 써도 그대로
-            region: cell(3)?.slice(0, 30) ?? null,
-            guides: names(cell(4) ?? undefined),
-            interviewer: names(cell(5) ?? undefined)[0] ?? null,
-            birthDate: findBirth(all),
-            memo: [parts.slice(6).join('/'), ...more].filter(Boolean).join('\n').slice(0, 2000),
+            region: cell(3 + o)?.slice(0, 30) ?? null,
+            guides: names(cell(4 + o) ?? undefined),
+            interviewer: names(cell(5 + o) ?? undefined)[0] ?? null,
+            birthDate: birthDigits.length === 6 || birthDigits.length === 8 ? birthDigits : findBirth(all),
+            memo: [parts.slice(6 + o).join('/'), ...more].filter(Boolean).join('\n').slice(0, 2000),
         };
     }
     let i = 1;
