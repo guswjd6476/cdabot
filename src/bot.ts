@@ -5,7 +5,7 @@ import crypto from 'crypto';
 import http from 'http';
 import { Telegraf } from 'telegraf';
 import { runMigrations } from './db';
-import { getErrorMessage } from './utils';
+import { getErrorMessage, nowKst } from './utils';
 import { describeAccess, isSysadmin, registerCore } from './core/engine';
 import { registerSida } from './sida/bot';
 import { registerInterview, syncAdminFinds } from './interview/bot';
@@ -129,10 +129,16 @@ server.listen(PORT, async () => {
         console.error('🚨 [DB 마이그레이션 실패] 시다봇 기능이 동작하지 않을 수 있습니다:', getErrorMessage(err));
     }
 
-    // 행정(카운셀링 봇) 찾등 → 특전대 찾기건 자동 등록 (10분마다)
+    // 행정(카운셀링 봇) 찾등 → 특전대 찾기건 자동 등록. 하루 한 번 23:50(KST) — 자주 돌면 Neon 무료 컴퓨트가 잠들지 못해 소진됨.
+    // 이번 주 시작~오늘만 보므로 하루의 끝에 돌아야 주 마지막 날 보고서도 들어감
     const sync = () => syncAdminFinds(bot.telegram).catch((err) => console.error('[행정 찾등 반영 실패]:', getErrorMessage(err)));
-    void sync();
-    setInterval(sync, 10 * 60 * 1000);
+    const scheduleSync = () => {
+        const now = nowKst();
+        let next = now.hour(23).minute(50).second(0).millisecond(0);
+        if (!next.isAfter(now)) next = next.add(1, 'day');
+        setTimeout(() => void sync().finally(scheduleSync), next.diff(now));
+    };
+    scheduleSync();
 
     if (WEBHOOK_URL) {
         try {

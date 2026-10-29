@@ -155,7 +155,7 @@ async function sidaOwners(orgId: number) {
 }
 
 // 특전대 기간에 발굴한 사람의 인터뷰 사후 보고서가 카운셀링 봇에 후속 [신청]으로 올라오면(만남 확인) 특전대 찾기건으로 자동 등록
-//   → 현황판·웹 반영. 서버가 10분마다 호출. 이번 특전대 주차 안에 올라온 것만, 실적은 그 발굴건을 올린 대원, 같은 이름 찾기건이 이미 있으면(인터뷰 후속 O 등) 안 넣음
+//   → 현황판·웹 반영. 서버가 매일 23:50(KST)에 호출. 이번 특전대 주차 안에 올라온 것만, 실적은 그 발굴건을 올린 대원, 같은 이름 찾기건이 이미 있으면(인터뷰 후속 O 등) 안 넣음
 export async function syncAdminFinds(telegram: Telegraf['telegram']) {
     const to = today();
     const ws = weekStart(to);
