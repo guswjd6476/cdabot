@@ -54,6 +54,8 @@ const reacted = () => calls.some((c) => c.method === 'setMessageReaction');
 before(async () => {
     setQueryable(pgliteQueryable(new PGlite()));
     await runMigrations();
+    // 웹 명단 흉내 (실제 컬럼 이름 그대로) — 온라인 대원의 지역
+    await query(`CREATE TABLE members ("고유번호" TEXT PRIMARY KEY, "이름" TEXT, "지역" TEXT, "구역" TEXT);`);
 });
 
 test('중복확인: 등록 전 무시 → 등록 후 첫 건 👍, 같은 아이디는 알림, 하루 현황', async () => {
@@ -73,9 +75,9 @@ test('중복확인: 등록 전 무시 → 등록 후 첫 건 👍, 같은 아이
     calls = [];
     await sendDailyInstaReports(bot.telegram);
     const report = calls.find((c) => c.payload.chat_id === String(DUP))!.payload.text;
-    assert.match(report, /U201: 오늘 2건 · 전체 2건/);
-    assert.match(report, /U202: 오늘 0건 · 전체 0건 \(오늘 중복 1\)/);
-    assert.match(report, /오늘 합계 2건 · 중복 2건/);
+    assert.match(report, /U201  오늘 2 · 누적 2\n/);
+    assert.match(report, /U202  오늘 0 · 누적 0 \(중복 1\)/);
+    assert.match(report, /오늘 2건 · 중복 2건 · 올린 대원 3명/);
 });
 
 test('중복확인 기존 목록 — "이름 / 아이디" 줄을 한 번에 넣으면 이후 중복으로 알림, 사람별 건수엔 안 들어감', async () => {
@@ -87,7 +89,7 @@ test('중복확인 기존 목록 — "이름 / 아이디" 줄을 한 번에 넣�
     assert.match(await send(202, 'https://www.instagram.com/cc_dd22', ROOM), /cc_dd22<\/b> — 기존 목록에 있음/);
     await send(202, 'new.one/이름/20대', ROOM);
     const report = await send(202, '/중복확인', ROOM);
-    assert.match(report, /U202: 오늘 1건 · 전체 1건 \(오늘 중복 1\)/);
+    assert.match(report, /U202  오늘 1 · 누적 1 \(중복 1\)/);
     assert.doesNotMatch(report, /기존 목록/);
 });
 
@@ -179,7 +181,26 @@ test('웹에서 정한 실명(cdabot_online_names)이 있으면 현황·중복 �
     await query(`INSERT INTO cdabot_online_names (poster_tg, name) VALUES (207, '김실명')`);
     assert.match(await send(208, 'https://www.instagram.com/nick.one', ROOM), /처음: 김실명/);
     const report = await send(207, '/중복확인', ROOM);
-    assert.match(report, /• 김실명: 오늘 1건/);
+    assert.match(report, /• 김실명  오늘 1/);
     assert.doesNotMatch(report, /U207/);
     assert.match(await send(ADMIN, '/중복확인 명단', ADMIN), /└ 김실명/);
+});
+
+test('23:50 현황 — 웹에서 명단과 연결한 대원은 지역별로 (정해진 지역 순서, 미연결은 맨 끝)', async () => {
+    const ROOM = -100777;
+    await send(ADMIN, '/중복확인 방등록', ROOM);
+    await query(`INSERT INTO members VALUES ('M1', '김강북', '강북', '2-3'), ('M2', '이노원', '노원', '1-1'), ('M3', '박강북', '강북', '2-5')`);
+    await query(`INSERT INTO cdabot_online_names (poster_tg, name, member_code) VALUES (301, '김강북', 'M1'), (302, '이노원', 'M2'), (303, '박강북', 'M3')`);
+    await send(301, 'r.one/가/1/2/3', ROOM);
+    await send(301, 'r.two/가/1/2/3', ROOM);
+    await send(302, 'r.three/가/1/2/3', ROOM);
+    assert.match(await send(303, 'r.one/가/1/2/3', ROOM), /처음: 김강북/); // 중복 (실명이 여러 명 있어도)
+    await send(304, 'r.four/가/1/2/3', ROOM); // 연결 안 된 대원
+    calls = [];
+    await sendDailyInstaReports(bot.telegram);
+    const report = calls.find((c) => c.payload.chat_id === String(ROOM))!.payload.text as string;
+    assert.match(report, /인스타 발굴 현황<\/b>\n오늘 4건 · 중복 1건 · 올린 대원 4명/);
+    assert.match(report, /🔹 <b>노원<\/b> — 오늘 1건 · 누적 1건\n• 이노원  오늘 1 · 누적 1\n\n🔹 <b>강북<\/b> — 오늘 2건 · 누적 2건\n• 김강북  오늘 2 · 누적 2\n• 박강북  오늘 0 · 누적 0 \(중복 1\)/);
+    assert.match(report, /\n\n❔ <b>지역 미연결<\/b> — 오늘 1건 · 누적 1건\n• U304  오늘 1 · 누적 1$/);
+    assert.match(await send(ADMIN, '/중복확인 명단', ADMIN), /r\.three<\/b> \/ 가 \/ 1 \/ 2 \/ 3\n    └ 이노원/); // 명단도 실명이 여러 명일 때
 });

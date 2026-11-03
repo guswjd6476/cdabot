@@ -5,7 +5,7 @@ import crypto from 'crypto';
 import { Telegraf } from 'telegraf';
 import { isSysadmin } from '../core/engine';
 import { query } from '../db';
-import { escapeHtml as e, getErrorMessage, nowKst, parseFlexibleDate, replyLong } from '../utils';
+import { dayjs, escapeHtml as e, getErrorMessage, nowKst, parseFlexibleDate, replyLong } from '../utils';
 
 type Ctx = any;
 const today = () => nowKst().format('YYYY-MM-DD');
@@ -105,7 +105,7 @@ async function saveInsta(ctx: Ctx, posts: InstaPost[]) {
         const id = p.id;
         const prev = (
             await query(
-                `SELECT poster_tg, ${posterName('poster_tg', 'poster_name')} AS poster_name, to_char(posted_date, 'YYYY-MM-DD') AS date, count(*) OVER () AS n FROM cdabot_insta_posts
+                `SELECT poster_tg, ${posterName('cdabot_insta_posts.poster_tg', 'poster_name')} AS poster_name, to_char(posted_date, 'YYYY-MM-DD') AS date, count(*) OVER () AS n FROM cdabot_insta_posts
                  WHERE chat_id = $1 AND insta_id = $2 ORDER BY id LIMIT 1;`,
                 [String(ctx.chat.id), id]
             )
@@ -122,29 +122,41 @@ async function saveInsta(ctx: Ctx, posts: InstaPost[]) {
     else await ctx.react('👍').catch(() => {});
 }
 
-// 올린 사람별: 오늘 건수 · 전체 건수 (중복은 건수에서 빼고 따로 표시)
+// 지역별 → 대원별 오늘 건수 · 누적 (중복은 건수에서 빼고 따로). 지역은 웹에서 연결한 명단(고유번호)의 지역, 없으면 '지역 미연결'
+// 지역 순서는 REGIONS, 그 밖의 지역은 가나다순, 미연결은 맨 끝
+const NO_REGION = '지역 미연결';
 async function instaReport(chatId: number | string, date = today()): Promise<string> {
     const rows = (
         await query(
-            `SELECT ${posterName('poster_tg', '(array_agg(poster_name ORDER BY id DESC))[1]')} AS name,
-                    count(*) FILTER (WHERE NOT dup) AS total,
-                    count(*) FILTER (WHERE NOT dup AND posted_date = $2) AS today,
-                    count(*) FILTER (WHERE dup AND posted_date = $2) AS dup_today
-             FROM cdabot_insta_posts WHERE chat_id = $1 AND posted_date <= $2 AND poster_tg <> ${SEED_TG}
-             GROUP BY poster_tg ORDER BY today DESC, total DESC, name;`,
+            `SELECT ${posterName('p.poster_tg', '(array_agg(p.poster_name ORDER BY p.id DESC))[1]')} AS name,
+                    (SELECT m."지역" FROM cdabot_online_names n JOIN members m ON m."고유번호" = n.member_code WHERE n.poster_tg = p.poster_tg) AS region,
+                    count(*) FILTER (WHERE NOT p.dup) AS total,
+                    count(*) FILTER (WHERE NOT p.dup AND p.posted_date = $2) AS today,
+                    count(*) FILTER (WHERE p.dup AND p.posted_date = $2) AS dup_today
+             FROM cdabot_insta_posts p WHERE p.chat_id = $1 AND p.posted_date <= $2 AND p.poster_tg <> ${SEED_TG}
+             GROUP BY p.poster_tg ORDER BY today DESC, total DESC, name;`,
             [String(chatId), date]
         )
-    ).rows.map((r) => ({ name: r.name as string, total: Number(r.total), today: Number(r.today), dup: Number(r.dup_today) }));
-    const sum = (k: 'today' | 'dup') => rows.reduce((s, r) => s + r[k], 0);
-    const lines = rows.map((r) => `• ${e(r.name)}: 오늘 ${r.today}건 · 전체 ${r.total}건${r.dup ? ` (오늘 중복 ${r.dup})` : ''}`);
-    return `📊 <b>${md(date)} 인스타 발굴 현황</b>\n${lines.join('\n') || '아직 올라온 건이 없습니다.'}\n\n오늘 합계 ${sum('today')}건${sum('dup') ? ` · 중복 ${sum('dup')}건` : ''}`;
+    ).rows.map((r) => ({ name: r.name as string, region: (r.region as string | null) || NO_REGION, total: Number(r.total), today: Number(r.today), dup: Number(r.dup_today) }));
+    type Row = (typeof rows)[number];
+    const sum = (xs: Row[], k: 'today' | 'total' | 'dup') => xs.reduce((s, r) => s + r[k], 0);
+    const rank = (reg: string) => (reg === NO_REGION ? 99 : REGIONS.includes(reg) ? REGIONS.indexOf(reg) : 50);
+    const regions = [...new Set(rows.map((r) => r.region))].sort((a, b) => rank(a) - rank(b) || a.localeCompare(b, 'ko'));
+    const blocks = regions.map((reg) => {
+        const xs = rows.filter((r) => r.region === reg);
+        const people = xs.map((r) => `• ${e(r.name)}  오늘 ${r.today} · 누적 ${r.total}${r.dup ? ` (중복 ${r.dup})` : ''}`);
+        return `${reg === NO_REGION ? '❔' : '🔹'} <b>${reg}</b> — 오늘 ${sum(xs, 'today')}건 · 누적 ${sum(xs, 'total')}건\n${people.join('\n')}`;
+    });
+    const day = `${md(date)}(${'일월화수목금토'[dayjs(date).day()]})`;
+    const head = `📊 <b>${day} 인스타 발굴 현황</b>\n오늘 ${sum(rows, 'today')}건${sum(rows, 'dup') ? ` · 중복 ${sum(rows, 'dup')}건` : ''} · 올린 대원 ${rows.filter((r) => r.today || r.dup).length}명`;
+    return blocks.length ? `${head}\n\n${blocks.join('\n\n')}` : `${head}\n\n아직 올라온 건이 없습니다.`;
 }
 
 // 그날 올라온 양식 내용 (모든 중복확인 방, 기존 목록 제외) — 개인정보라 시스템 관리자 1:1 에서만
 async function instaList(date: string): Promise<string> {
     const rows = (
         await query(
-            `SELECT insta_id, region, guide, name, age, residence, relationship, memo, url, ${posterName('poster_tg', 'poster_name')} AS poster_name, dup FROM cdabot_insta_posts
+            `SELECT insta_id, region, guide, name, age, residence, relationship, memo, url, ${posterName('cdabot_insta_posts.poster_tg', 'poster_name')} AS poster_name, dup FROM cdabot_insta_posts
              WHERE posted_date = $1 AND poster_tg <> ${SEED_TG} ORDER BY id;`,
             [date]
         )
