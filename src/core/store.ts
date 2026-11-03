@@ -92,6 +92,7 @@ export async function getGroupOrg(chatId: number, moduleKey: string): Promise<nu
 // 일반 그룹이 슈퍼그룹으로 바뀌면(주제 켜기 등) 텔레그램이 방 ID를 바꿈 → 등록을 새 ID로 옮김
 export async function moveGroupChat(oldId: number, newId: number) {
     await query(`UPDATE cdabot_group_chats SET chat_id = $2 WHERE chat_id = $1;`, [String(oldId), String(newId)]);
+    for (const t of ['cdabot_rooms', 'cdabot_insta_posts', 'cdabot_tally_posts']) await query(`UPDATE ${t} SET chat_id = $2 WHERE chat_id = $1;`, [String(oldId), String(newId)]);
     await query(
         `UPDATE cdabot_modules SET settings = jsonb_set(settings, '{board,chatId}', to_jsonb($2::bigint))
          WHERE settings->'board'->>'chatId' = $1;`,

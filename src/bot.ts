@@ -8,6 +8,7 @@ import { runMigrations } from './db';
 import { getErrorMessage, nowKst } from './utils';
 import { describeAccess, isSysadmin, registerCore } from './core/engine';
 import { registerSida } from './sida/bot';
+import { handleRelay, publishRelay, registerOnline, relaySecretOk, sendDailyInstaReports } from './online/bot';
 import { registerInterview, syncAdminFinds } from './interview/bot';
 import { purgeExpiredInterviews } from './interview/store';
 import { purgeExpiredPii } from './sida/store';
@@ -59,6 +60,8 @@ bot.hears(/^[\/!]역할(?:@\w+)?$/i, async (ctx) => {
     }
 });
 
+// 온라인 방 (/중복확인, /취합) — 특전대보다 먼저: 등록된 방의 '아이디/이름/…' 줄을 특전대 결과로 오인하지 않도록
+registerOnline(bot);
 // 특전대 모듈 (/특전대 명령, 버튼, 입력 흐름)
 registerSida(bot);
 // 인터뷰 추적 모듈 (/인터뷰 — 특전대와 별개)
@@ -89,6 +92,30 @@ const server = http.createServer(async (req, res) => {
     const route = '/' + (url.pathname.split('/').filter(Boolean).pop() || '');
     if (req.method === 'POST' && route === '/webhook') {
         return bot.webhookCallback(url.pathname, { secretToken: WEBHOOK_SECRET })(req, res);
+    }
+    // 카운셀링 봇이 넘겨준 취합 방 글 (헤더 x-relay-secret = cdabot_relay.secret) → 보낼 답 목록을 JSON으로 돌려줌
+    if (req.method === 'POST' && route === '/relay') {
+        try {
+            if (!(await relaySecretOk(String(req.headers['x-relay-secret'] || '')))) {
+                res.writeHead(403, { 'Content-Type': 'text/plain; charset=utf-8' });
+                return res.end('Forbidden');
+            }
+            let raw = '';
+            for await (const chunk of req) {
+                raw += chunk;
+                if (raw.length > 50_000) {
+                    res.writeHead(413, { 'Content-Type': 'text/plain; charset=utf-8' });
+                    return res.end('Too large');
+                }
+            }
+            const actions = await handleRelay(JSON.parse(raw));
+            res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+            return res.end(JSON.stringify(actions));
+        } catch (err: unknown) {
+            console.error('[카운셀링 봇 전달 에러]:', getErrorMessage(err));
+            res.writeHead(500, { 'Content-Type': 'text/plain; charset=utf-8' });
+            return res.end('Failed');
+        }
     }
 
     const cronJobs: Record<string, () => Promise<void>> = {
@@ -131,7 +158,12 @@ server.listen(PORT, async () => {
 
     // 행정(카운셀링 봇) 찾등 → 특전대 찾기건 자동 등록. 하루 한 번 23:50(KST) — 자주 돌면 Neon 무료 컴퓨트가 잠들지 못해 소진됨.
     // 이번 주 시작~오늘만 보므로 하루의 끝에 돌아야 주 마지막 날 보고서도 들어감
-    const sync = () => syncAdminFinds(bot.telegram).catch((err) => console.error('[행정 찾등 반영 실패]:', getErrorMessage(err)));
+    // 같은 때 중복확인 방마다 오늘 인스타 현황
+    const sync = () =>
+        Promise.all([
+            syncAdminFinds(bot.telegram).catch((err) => console.error('[행정 찾등 반영 실패]:', getErrorMessage(err))),
+            sendDailyInstaReports(bot.telegram).catch((err) => console.error('[인스타 현황 전송 실패]:', getErrorMessage(err))),
+        ]);
     const scheduleSync = () => {
         const now = nowKst();
         let next = now.hour(23).minute(50).second(0).millisecond(0);
@@ -144,6 +176,7 @@ server.listen(PORT, async () => {
         try {
             await bot.telegram.setWebhook(WEBHOOK_URL, { allowed_updates: [...ALLOWED_UPDATES], secret_token: WEBHOOK_SECRET });
             console.log(`Telegram Webhook 등록 완료: ${WEBHOOK_URL}`);
+            await publishRelay(WEBHOOK_URL).catch((err) => console.error('[카운셀링 봇 전달 주소 저장 실패]:', getErrorMessage(err)));
         } catch (e: unknown) {
             console.error('Webhook 등록 에러:', getErrorMessage(e));
         }
