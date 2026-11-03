@@ -52,13 +52,33 @@ async function setDupRoom(chatId: number, on: boolean, title?: string) {
 
 /* ====================== 중복확인 ====================== */
 
+// '/중복확인 추가' 로 넣은 기존 아이디 (올린 사람 없음 — 사람별 건수에서 뺌)
+const SEED_TG = 0;
+
+// '이름 / 아이디' 줄마다 마지막 칸의 아이디 (+ instagram.com 링크). 이미 이 방에 있는 아이디는 건너뜀
+async function seedInsta(ctx: Ctx, text: string) {
+    const ids = new Set(parseInstaIds(text));
+    for (const m of text.matchAll(/\/\s*@?([A-Za-z0-9._]{1,30})\s*$/gm)) if (/[a-z]/i.test(m[1])) ids.add(m[1].toLowerCase());
+    if (!ids.size) return void (await ctx.reply('⚠️ 아이디를 찾지 못했습니다. 한 줄에 하나씩 "이름 / 아이디" 로 적어주세요.'));
+    let added = 0;
+    for (const id of ids) {
+        const r = await query(
+            `INSERT INTO cdabot_insta_posts (chat_id, insta_id, poster_tg, poster_name, posted_date)
+             SELECT $1, $2, $3, '기존 목록', $4 WHERE NOT EXISTS (SELECT 1 FROM cdabot_insta_posts WHERE chat_id = $1 AND insta_id = $2) RETURNING id;`,
+            [String(ctx.chat.id), id, SEED_TG, today()]
+        );
+        added += r.rows.length;
+    }
+    await ctx.reply(`✅ 기존 아이디 ${added}개 추가${ids.size > added ? ` (이미 있던 ${ids.size - added}개 제외)` : ''}. 이제 이 아이디가 올라오면 중복으로 알립니다.`);
+}
+
 async function saveInsta(ctx: Ctx, ids: string[]) {
     const name = [ctx.from.first_name, ctx.from.last_name].filter(Boolean).join(' ') || String(ctx.from.id);
     const dups: string[] = [];
     for (const id of ids) {
         const prev = (
             await query(
-                `SELECT poster_name, to_char(posted_date, 'YYYY-MM-DD') AS date, count(*) OVER () AS n FROM cdabot_insta_posts
+                `SELECT poster_tg, poster_name, to_char(posted_date, 'YYYY-MM-DD') AS date, count(*) OVER () AS n FROM cdabot_insta_posts
                  WHERE chat_id = $1 AND insta_id = $2 ORDER BY id LIMIT 1;`,
                 [String(ctx.chat.id), id]
             )
@@ -66,7 +86,8 @@ async function saveInsta(ctx: Ctx, ids: string[]) {
         await query(`INSERT INTO cdabot_insta_posts (chat_id, insta_id, poster_tg, poster_name, posted_date, dup) VALUES ($1, $2, $3, $4, $5, $6);`, [
             String(ctx.chat.id), id, ctx.from.id, name, today(), !!prev,
         ]);
-        if (prev) dups.push(`• <b>${e(id)}</b> — 처음: ${e(prev.poster_name)} (${md(prev.date)})${Number(prev.n) > 1 ? ` · 이미 ${prev.n}번 올라옴` : ''}`);
+        const first = Number(prev?.poster_tg) === SEED_TG ? '기존 목록에 있음' : `처음: ${e(prev?.poster_name)} (${md(prev?.date ?? today())})`;
+        if (prev) dups.push(`• <b>${e(id)}</b> — ${first}${Number(prev.n) > 1 ? ` · 이미 ${prev.n}번 올라옴` : ''}`);
     }
     if (dups.length) await ctx.reply(`🚨 <b>중복 인스타</b>\n${dups.join('\n')}`, { parse_mode: 'HTML' });
     else await ctx.react('👍').catch(() => {});
@@ -80,7 +101,7 @@ async function instaReport(chatId: number | string, date = today()): Promise<str
                     count(*) FILTER (WHERE NOT dup) AS total,
                     count(*) FILTER (WHERE NOT dup AND posted_date = $2) AS today,
                     count(*) FILTER (WHERE dup AND posted_date = $2) AS dup_today
-             FROM cdabot_insta_posts WHERE chat_id = $1 AND posted_date <= $2
+             FROM cdabot_insta_posts WHERE chat_id = $1 AND posted_date <= $2 AND poster_tg <> ${SEED_TG}
              GROUP BY poster_tg ORDER BY today DESC, total DESC, name;`,
             [String(chatId), date]
         )
@@ -151,6 +172,11 @@ async function dupCommand(ctx: Ctx, args: string) {
         ));
     }
     if (!(await isDupRoom(ctx.chat.id))) return void (await ctx.reply('ℹ️ 중복확인 방이 아닙니다. 시스템 관리자가 <code>/중복확인 방등록</code> 으로 등록해주세요.', { parse_mode: 'HTML' }));
+    const seed = args.match(/^추가(?:\s+([\s\S]*))?$/);
+    if (seed) {
+        if (!isSysadmin(ctx.from?.id)) return void (await ctx.reply('⛔ 시스템 관리자만 기존 아이디를 넣을 수 있습니다.'));
+        return seedInsta(ctx, seed[1] || '');
+    }
     const { date, topic } = dateAndTopic(args);
     if (topic) return void (await ctx.reply(`⚠️ 날짜를 확인해주세요: "${args}" (예: /중복확인 11.2)`));
     await ctx.reply(await instaReport(ctx.chat.id, date), { parse_mode: 'HTML' });
@@ -158,7 +184,7 @@ async function dupCommand(ctx: Ctx, args: string) {
 
 // 특전대·인터뷰보다 먼저 등록 (중복확인 방의 '아이디/이름/…' 줄을 특전대 결과로 오인하지 않도록)
 export function registerOnline(bot: Telegraf<any>) {
-    bot.hears(/^[\/!]중복확인(?:@\w+)?(?:\s+(.+))?$/, run((ctx) => dupCommand(ctx, (ctx.match[1] || '').trim())));
+    bot.hears(/^[\/!]중복확인(?:@\w+)?(?:\s+([\s\S]+))?$/, run((ctx) => dupCommand(ctx, (ctx.match[1] || '').trim())));
     bot.on('message', (ctx: Ctx, next) => {
         if (ctx.message.migrate_from_chat_id) rooms = null; // 방 ID 변경 (moveGroupChat 이 DB를 옮김)
         return next();

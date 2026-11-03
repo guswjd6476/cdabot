@@ -78,6 +78,19 @@ test('중복확인: 등록 전 무시 → 등록 후 첫 건 👍, 같은 아이
     assert.match(report, /오늘 합계 2건 · 중복 2건/);
 });
 
+test('중복확인 기존 목록 — "이름 / 아이디" 줄을 한 번에 넣으면 이후 중복으로 알림, 사람별 건수엔 안 들어감', async () => {
+    const ROOM = -100555;
+    await send(ADMIN, '/중복확인 방등록', ROOM);
+    assert.match(await send(201, '/중복확인 추가\n가나 / aa.bb1', ROOM), /시스템 관리자만/);
+    assert.match(await send(ADMIN, '/중복확인 추가\n0가나 / Aa.bb1\n다라 / cc_dd22\n마바 / 05_ee3\n사아 / 0000', ROOM), /기존 아이디 3개 추가/);
+    assert.match(await send(ADMIN, '/중복확인 추가\n가나 / aa.bb1\n자차 / ff.gg', ROOM), /1개 추가 \(이미 있던 1개 제외\)/);
+    assert.match(await send(202, 'https://www.instagram.com/cc_dd22', ROOM), /cc_dd22<\/b> — 기존 목록에 있음/);
+    await send(202, 'new.one/이름/20대', ROOM);
+    const report = await send(202, '/중복확인', ROOM);
+    assert.match(report, /U202: 오늘 1건 · 전체 1건 \(오늘 중복 1\)/);
+    assert.doesNotMatch(report, /기존 목록/);
+});
+
 test('카운셀링 봇 전달 주소·비밀값 — 시작할 때 DB에, 비밀값은 다시 시작해도 유지', async () => {
     assert.equal(await relaySecretOk('x'), false);
     await publishRelay('https://acc.alwaysdata.net/cdabot/webhook');
