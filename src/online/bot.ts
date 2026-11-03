@@ -1,5 +1,5 @@
 // 온라인 업무 (특전대·인터뷰와 별개, 조직 없음)
-//   온라인 전도 — /온라인 방등록 (시스템 관리자, 시다봇이 있는 방): 올라온 인스타 양식 저장, 같은 아이디면 바로 중복 알림, 매일 23:50 지역별 현황 (/중복확인 도 같은 명령)
+//   온라인 전도 — /온라인 방등록 (시스템 관리자, 시다봇이 있는 방): 올라온 인스타 양식 저장, 같은 아이디면 바로 중복 알림, 매일 23:30 지역별 현황 (/중복확인 도 같은 명령)
 //   취합 — 카운셀링 봇이 지역 담당방의 '#주제 #지역 내용' 글을 넘겨줌 → 시스템 관리자가 카운셀링 봇 1:1 대화에서 /취합
 import crypto from 'crypto';
 import { Telegraf } from 'telegraf';
@@ -171,7 +171,7 @@ async function instaList(date: string): Promise<string> {
     return `📇 <b>${md(date)} 온라인 전도 명단</b> (${rows.length}건)\n<i>지역/인도자/아이디/이름/나이/거주지/이성친구유무/기타 └ 올린 사람</i>\n\n${lines.join('\n')}`;
 }
 
-// 매일 23:50 (bot.ts 스케줄) — 중복확인 방마다 오늘 현황
+// 매일 23:30 (bot.ts 스케줄) — 온라인 전도 방마다 오늘 지역별 현황
 export async function sendDailyInstaReports(telegram: any) {
     const chats = (await query(`SELECT chat_id::text AS id FROM cdabot_rooms WHERE kind = 'dup';`)).rows.map((r) => r.id);
     for (const id of chats) {
@@ -235,7 +235,7 @@ async function dupCommand(ctx: Ctx, args: string) {
         await setDupRoom(ctx.chat.id, args === '방등록', ctx.chat.title);
         return void (await ctx.reply(
             args === '방등록'
-                ? '✅ 이 방을 온라인 전도 방으로 등록했습니다.\n올라온 인스타 양식을 저장하고, 같은 아이디가 다시 올라오면 바로 알리고, 매일 23:50에 지역별 현황을 올립니다. (지금 현황: /온라인)'
+                ? '✅ 이 방을 온라인 전도 방으로 등록했습니다.\n올라온 인스타 양식을 저장하고, 같은 아이디가 다시 올라오면 바로 알리고, 매일 23:30에 오늘 정리(지역별 현황)을 올립니다. (지금 현황: /온라인)'
                 : '🔓 온라인 전도 방 등록을 해제했습니다.'
         ));
     }

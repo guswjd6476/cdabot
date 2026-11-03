@@ -157,21 +157,20 @@ server.listen(PORT, async () => {
         console.error('🚨 [DB 마이그레이션 실패] 시다봇 기능이 동작하지 않을 수 있습니다:', getErrorMessage(err));
     }
 
-    // 행정(카운셀링 봇) 찾등 → 특전대 찾기건 자동 등록. 하루 한 번 23:50(KST) — 자주 돌면 Neon 무료 컴퓨트가 잠들지 못해 소진됨.
-    // 이번 주 시작~오늘만 보므로 하루의 끝에 돌아야 주 마지막 날 보고서도 들어감
-    // 같은 때 온라인 전도 방마다 오늘 지역별 현황
-    const sync = () =>
-        Promise.all([
-            syncAdminFinds(bot.telegram).catch((err) => console.error('[행정 찾등 반영 실패]:', getErrorMessage(err))),
-            sendDailyInstaReports(bot.telegram).catch((err) => console.error('[인스타 현황 전송 실패]:', getErrorMessage(err))),
-        ]);
-    const scheduleSync = () => {
-        const now = nowKst();
-        let next = now.hour(23).minute(50).second(0).millisecond(0);
-        if (!next.isAfter(now)) next = next.add(1, 'day');
-        setTimeout(() => void sync().finally(scheduleSync), next.diff(now));
+    // 매일 정해진 시각(KST)에 한 번 — 자주 돌면 Neon 무료 컴퓨트가 잠들지 못해 소진됨
+    const daily = (hour: number, minute: number, job: () => Promise<unknown>) => {
+        const schedule = () => {
+            const now = nowKst();
+            let next = now.hour(hour).minute(minute).second(0).millisecond(0);
+            if (!next.isAfter(now)) next = next.add(1, 'day');
+            setTimeout(() => void job().finally(schedule), next.diff(now));
+        };
+        schedule();
     };
-    scheduleSync();
+    // 온라인 전도 방마다 오늘 정리 (지역별 현황)
+    daily(23, 30, () => sendDailyInstaReports(bot.telegram).catch((err) => console.error('[온라인 전도 현황 전송 실패]:', getErrorMessage(err))));
+    // 행정(카운셀링 봇) 찾등 → 특전대 찾기건 자동 등록. 이번 주 시작~오늘만 보므로 하루의 끝에 돌아야 주 마지막 날 보고서도 들어감
+    daily(23, 50, () => syncAdminFinds(bot.telegram).catch((err) => console.error('[행정 찾등 반영 실패]:', getErrorMessage(err))));
 
     if (WEBHOOK_URL) {
         try {
