@@ -12,7 +12,6 @@ import { query } from '../db';
 
 const ADMIN = 9000;
 const DUP = -100111;
-const TALLY = -100222;
 const POST = 'emstiy/김지연/20대초중반/성북구 거주예상/국민대학생,자취,본가는 춘천,영문학과\n\nhttps://www.instagram.com/emstiy?dlrf=ZHJqN2NxaDF0YmUx';
 
 test('파싱', () => {
@@ -41,7 +40,7 @@ async function send(from: number, text: string, chatId: number, relay = false) {
     calls = [];
     const update = {
         update_id: ++n,
-        message: { message_id: 5000 + n, date: Math.floor(Date.now() / 1000), chat: { id: chatId, type: 'supergroup' }, from: { id: from, is_bot: false, first_name: `U${from}` }, text },
+        message: { message_id: 5000 + n, date: Math.floor(Date.now() / 1000), chat: { id: chatId, type: chatId < 0 ? 'supergroup' : 'private' }, from: { id: from, is_bot: false, first_name: `U${from}` }, text },
     } as any;
     if (relay) {
         const actions = await handleRelay(update);
@@ -79,28 +78,6 @@ test('중복확인: 등록 전 무시 → 등록 후 첫 건 👍, 같은 아이
     assert.match(report, /오늘 합계 2건 · 중복 2건/);
 });
 
-test('취합: 주제별·지역별로 내용을 모음, 다른 방·지역 없는 태그는 무시', async () => {
-    assert.match(await send(ADMIN, '/취합 방등록', TALLY), /취합 방으로 등록/);
-    await send(201, '#출석 #도봉 12명', TALLY);
-    assert.ok(reacted());
-    await send(202, '#출석 #성북구 9명', TALLY);
-    await send(203, '#출석 #도봉 추가 1명', TALLY);
-    await send(203, '#심방 #노원 3가정', TALLY);
-    await send(203, '#잡담 #아무거나', TALLY);
-    await send(203, '#출석 #중랑 5명', DUP); // 취합 방 아님
-    const out = await send(201, '/취합', TALLY);
-    assert.match(out, /#출석<\/b> \(2\/8 지역\)/);
-    assert.match(out, /• 도봉: 12명 \/ 추가 1명/);
-    assert.match(out, /• 성북: 9명/);
-    assert.match(out, /• 중랑: -/);
-    assert.match(out, /#심방<\/b> \(1\/8 지역\)\n• 도봉: -\n• 성북: -\n• 노원: 3가정/);
-    const one = await send(201, '/취합 #심방', TALLY);
-    assert.match(one, /#심방/);
-    assert.doesNotMatch(one, /#출석/);
-    assert.match(await send(201, '/취합 11.2', TALLY), /취합할 내용이 없습니다/);
-    assert.match(await send(201, '/취합', DUP), /취합 방이 아닙니다/);
-});
-
 test('카운셀링 봇 전달 주소·비밀값 — 시작할 때 DB에, 비밀값은 다시 시작해도 유지', async () => {
     assert.equal(await relaySecretOk('x'), false);
     await publishRelay('https://acc.alwaysdata.net/cdabot/webhook');
@@ -112,21 +89,32 @@ test('카운셀링 봇 전달 주소·비밀값 — 시작할 때 DB에, 비밀�
     assert.equal(await relaySecretOk(secret.slice(1) + 'z'), false);
 });
 
-test('카운셀링 봇 전달: 취합만, 답은 돌려줘서 카운셀링 봇이 보냄, 시다봇과 같은 방에 있어도 등록한 쪽만 처리', async () => {
-    const BOTH = -100333;
-    assert.equal(await send(ADMIN, '/중복확인 방등록', BOTH, true), ''); // 중복확인은 카운셀링 봇으로 안 받음
-    assert.match(await send(ADMIN, '/중복확인 방등록', BOTH), /중복확인 방으로 등록/); // 시다봇 직접
-    assert.match(await send(ADMIN, '/취합 방등록', BOTH, true), /취합 방으로 등록/);
-
-    await send(201, '#출석 #강북 7명', BOTH, true);
+test('취합: 지역 담당방 글(카운셀링 봇이 전달)을 모아 관리자 1:1 /취합 으로, 답은 돌려줘서 카운셀링 봇이 보냄', async () => {
+    const DOBONG = -100401;
+    const SEONGBUK = -100402;
+    await send(201, '#출석 #도봉 12명', DOBONG, true);
     assert.ok(reacted());
-    await send(201, '#출석 #강북 7명', BOTH); // 시다봇에도 같은 글이 오지만 취합은 카운셀링 봇 쪽 방
+    await send(202, '#출석 #성북구 9명', SEONGBUK, true);
+    await send(203, '#출석 #도봉 추가 1명', DOBONG, true);
+    await send(203, '#심방 #노원 3가정', SEONGBUK, true);
+    await send(203, '#잡담 #아무거나', DOBONG, true);
     assert.ok(!reacted());
-    assert.match(await send(201, '/취합 출석', BOTH, true), /• 강북: 7명\n/);
+    await send(203, '#출석 #중랑 5명', DUP); // 시다봇이 직접 있는 방 글은 취합 안 함
 
-    await send(202, 'both.one/이영희/20대', BOTH);
-    assert.ok(reacted());
-    await send(202, 'both.one/이영희/20대', BOTH, true); // 카운셀링 봇 쪽은 중복확인 안 함
+    assert.match(await send(201, '/취합', 201, true), /시스템 관리자만/);
+    assert.equal(await send(ADMIN, '/취합', DOBONG, true), ''); // 단체방에서는 안 보여줌
+    assert.equal(await send(ADMIN, '/취합', ADMIN), ''); // 시다봇 1:1 에는 /취합 없음 (카운셀링 봇 1:1 에서)
+    const out = await send(ADMIN, '/취합', ADMIN, true);
+    assert.match(out, /#출석<\/b> \(2\/8 지역\)/);
+    assert.match(out, /• 도봉: 12명 \/ 추가 1명/);
+    assert.match(out, /• 성북: 9명/);
+    assert.match(out, /• 중랑: -/);
+    assert.match(out, /#심방<\/b> \(1\/8 지역\)\n• 도봉: -\n• 성북: -\n• 노원: 3가정/);
+    const one = await send(ADMIN, '/취합 #심방', ADMIN, true);
+    assert.match(one, /#심방/);
+    assert.doesNotMatch(one, /#출석/);
+    assert.match(await send(ADMIN, '/취합 11.2', ADMIN, true), /취합할 내용이 없습니다/);
+
+    await send(202, 'relay.one/이영희/20대', DOBONG, true); // 카운셀링 봇 쪽은 중복확인 안 함
     assert.ok(!reacted());
-    assert.match(await send(203, 'https://www.instagram.com/both.one', BOTH), /중복 인스타[\s\S]*처음: U202 \(\d+\.\d+\)$/); // '이미 2번' 없음 = 카운셀링 봇 쪽은 저장 안 됨
 });

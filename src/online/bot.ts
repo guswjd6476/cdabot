@@ -1,13 +1,12 @@
-// 온라인 방 업무 (특전대·인터뷰와 별개, 조직 없이 방 단위. 방 등록은 시스템 관리자)
-//   /중복확인 방등록 — 같은 인스타 아이디가 다시 올라오면 바로 알림, 매일 23:50 올린 사람별 건수
-//   /취합 방등록     — '#주제 #지역 내용' 메시지를 주제별·지역별로 모아 /취합 으로 보여줌
+// 온라인 업무 (특전대·인터뷰와 별개, 조직 없음)
+//   /중복확인 방등록 (시스템 관리자, 시다봇이 있는 방) — 같은 인스타 아이디가 다시 올라오면 바로 알림, 매일 23:50 올린 사람별 건수
+//   취합 — 카운셀링 봇이 지역 담당방의 '#주제 #지역 내용' 글을 넘겨줌 → 시스템 관리자가 카운셀링 봇 1:1 대화에서 /취합
 import crypto from 'crypto';
 import { Telegraf } from 'telegraf';
 import { isSysadmin } from '../core/engine';
 import { query } from '../db';
 import { escapeHtml as e, getErrorMessage, nowKst, parseFlexibleDate, replyLong } from '../utils';
 
-type Kind = 'dup' | 'tally';
 type Ctx = any;
 const today = () => nowKst().format('YYYY-MM-DD');
 const md = (d: string) => `${Number(d.slice(5, 7))}.${Number(d.slice(8, 10))}`;
@@ -39,20 +38,15 @@ export function parseTally(text: string): Tally | null {
 
 /* ====================== 방 ====================== */
 
-// 방 목록은 메모리에 (모든 단체방 메시지마다 DB를 깨우지 않도록). 방 ID가 바뀌면 다시 읽음
-// relay 도 키에 넣음 — 시다봇·카운셀링 봇이 같은 방에 같이 있어도 등록한 쪽만 처리 (두 번 저장 방지)
+// 중복확인 방 목록은 메모리에 (모든 단체방 메시지마다 DB를 깨우지 않도록). 방 ID가 바뀌면 다시 읽음
 let rooms: Promise<Set<string>> | null = null;
-const roomKey = (chatId: number | string, kind: Kind, relay: boolean) => `${chatId}:${kind}:${relay}`;
-async function isRoom(chatId: number, kind: Kind, relay: boolean) {
-    rooms ??= query(`SELECT chat_id::text AS id, kind, relay FROM cdabot_rooms;`).then((r) => new Set(r.rows.map((x) => roomKey(x.id, x.kind, x.relay))));
-    return (await rooms.catch(() => ((rooms = null), new Set<string>()))).has(roomKey(chatId, kind, relay));
+async function isDupRoom(chatId: number) {
+    rooms ??= query(`SELECT chat_id::text AS id FROM cdabot_rooms WHERE kind = 'dup';`).then((r) => new Set(r.rows.map((x) => x.id as string)));
+    return (await rooms.catch(() => ((rooms = null), new Set<string>()))).has(String(chatId));
 }
-async function setRoom(chatId: number, kind: Kind, on: boolean, title: string | undefined, relay: boolean) {
-    if (on)
-        await query(`INSERT INTO cdabot_rooms (chat_id, kind, title, relay) VALUES ($1, $2, $3, $4) ON CONFLICT (chat_id, kind) DO UPDATE SET title = EXCLUDED.title, relay = EXCLUDED.relay;`, [
-            String(chatId), kind, title || null, relay,
-        ]);
-    else await query(`DELETE FROM cdabot_rooms WHERE chat_id = $1 AND kind = $2;`, [String(chatId), kind]);
+async function setDupRoom(chatId: number, on: boolean, title?: string) {
+    if (on) await query(`INSERT INTO cdabot_rooms (chat_id, kind, title) VALUES ($1, 'dup', $2) ON CONFLICT (chat_id, kind) DO UPDATE SET title = EXCLUDED.title;`, [String(chatId), title || null]);
+    else await query(`DELETE FROM cdabot_rooms WHERE chat_id = $1 AND kind = 'dup';`, [String(chatId)]);
     rooms = null;
 }
 
@@ -96,9 +90,9 @@ async function instaReport(chatId: number | string, date = today()): Promise<str
     return `📊 <b>${md(date)} 인스타 발굴 현황</b>\n${lines.join('\n') || '아직 올라온 건이 없습니다.'}\n\n오늘 합계 ${sum('today')}건${sum('dup') ? ` · 중복 ${sum('dup')}건` : ''}`;
 }
 
-// 매일 23:50 (bot.ts 스케줄) — 중복확인 방마다 오늘 현황 (중복확인은 시다봇이 직접 있는 방만)
+// 매일 23:50 (bot.ts 스케줄) — 중복확인 방마다 오늘 현황
 export async function sendDailyInstaReports(telegram: any) {
-    const chats = (await query(`SELECT chat_id::text AS id FROM cdabot_rooms WHERE kind = 'dup' AND NOT relay;`)).rows.map((r) => r.id);
+    const chats = (await query(`SELECT chat_id::text AS id FROM cdabot_rooms WHERE kind = 'dup';`)).rows.map((r) => r.id);
     for (const id of chats) {
         await telegram.sendMessage(id, await instaReport(id), { parse_mode: 'HTML' }).catch((err: unknown) => console.error(`[인스타 현황 전송 실패] ${id}:`, getErrorMessage(err)));
     }
@@ -113,13 +107,10 @@ async function saveTally(ctx: Ctx, t: Tally) {
     await ctx.react('👍').catch(() => {});
 }
 
-// 그날 올라온 주제마다 지역 순서대로 내용 (안 올린 지역은 '-'). topic 을 주면 그 주제만
-async function tallyReport(chatId: number, date: string, topic?: string): Promise<string> {
-    const rows = (
-        await query(`SELECT topic, region, content FROM cdabot_tally_posts WHERE chat_id = $1 AND posted_date = $2 AND ($3::text IS NULL OR topic = $3) ORDER BY id;`, [
-            String(chatId), date, topic ?? null,
-        ])
-    ).rows as Tally[];
+// 그날 모든 지역 담당방에서 올라온 주제마다 지역 순서대로 내용 (안 올린 지역은 '-'). topic 을 주면 그 주제만
+async function tallyReport(date: string, topic?: string): Promise<string> {
+    const rows = (await query(`SELECT topic, region, content FROM cdabot_tally_posts WHERE posted_date = $1 AND ($2::text IS NULL OR topic = $2) ORDER BY id;`, [date, topic ?? null]))
+        .rows as Tally[];
     const topics = [...new Set(rows.map((r) => r.topic))];
     if (!topics.length) return `📋 ${md(date)} ${topic ? `#${e(topic)} ` : ''}취합할 내용이 없습니다.`;
     const blocks = topics.map((tp) => {
@@ -132,66 +123,56 @@ async function tallyReport(chatId: number, date: string, topic?: string): Promis
 
 /* ====================== 명령·메시지 ====================== */
 
-const KIND_OF: Record<string, Kind> = { 중복확인: 'dup', 취합: 'tally' };
-const REGISTERED: Record<Kind, string> = {
-    dup: '✅ 이 방을 중복확인 방으로 등록했습니다.\n같은 인스타 아이디가 다시 올라오면 바로 알리고, 매일 23:50에 올린 사람별 건수를 올립니다. (지금 현황: /중복확인)',
-    tally: `✅ 이 방을 취합 방으로 등록했습니다.\n<code>#주제 #지역 내용</code> 으로 올리면 주제별·지역별로 모아 /취합 으로 보여줍니다 (<code>/취합 주제</code>, <code>/취합 11.2</code>). 지역: ${REGIONS.join(', ')}`,
+const run = (fn: (ctx: Ctx, next: () => Promise<void>) => Promise<unknown>) => async (ctx: Ctx, next: () => Promise<void>) => {
+    try {
+        await fn(ctx, next);
+    } catch (err) {
+        console.error('[온라인 업무 처리 에러]:', err);
+        await ctx.reply('⚠️ 처리 중 오류가 발생했습니다. 잠시 후 다시 시도하고, 계속되면 관리자에게 알려주세요.').catch(() => {});
+    }
 };
 
-async function command(ctx: Ctx, cmd: string, args: string, relay: boolean) {
-    const kind = KIND_OF[cmd];
-    if (ctx.chat.type === 'private') return void (await ctx.reply(`👥 /${cmd} 는 단체방에서 사용해주세요.`));
-    if (args === '방등록' || args === '방해제') {
-        if (!isSysadmin(ctx.from?.id)) return void (await ctx.reply('⛔ 시스템 관리자만 방을 등록·해제할 수 있습니다.'));
-        await setRoom(ctx.chat.id, kind, args === '방등록', ctx.chat.title, relay);
-        return void (await ctx.reply(args === '방등록' ? REGISTERED[kind] : `🔓 ${cmd} 방 등록을 해제했습니다.`, { parse_mode: 'HTML' }));
-    }
-    if (!(await isRoom(ctx.chat.id, kind, relay))) return void (await ctx.reply(`ℹ️ ${cmd} 방이 아닙니다. 시스템 관리자가 <code>/${cmd} 방등록</code> 으로 등록해주세요.`, { parse_mode: 'HTML' }));
-    // 인자: 날짜(11.2) 와 취합 주제(#주제 또는 주제) — 둘 다 생략 가능
+// 인자: 날짜(11.2) 와 주제(#주제 또는 주제) — 둘 다 생략 가능
+function dateAndTopic(args: string) {
     const words = args.split(/\s+/).filter(Boolean);
     const dateWord = words.find((w) => /\d/.test(w) && parseFlexibleDate(w));
-    const date = dateWord ? parseFlexibleDate(dateWord)! : today();
-    const topic = words.filter((w) => w !== dateWord).join(' ').replace(/^#/, '') || undefined;
-    if (kind === 'dup') {
-        if (topic) return void (await ctx.reply(`⚠️ 날짜를 확인해주세요: "${args}" (예: /${cmd} 11.2)`));
-        return void (await ctx.reply(await instaReport(ctx.chat.id, date), { parse_mode: 'HTML' }));
-    }
-    await replyLong(ctx, await tallyReport(ctx.chat.id, date, topic));
+    return { date: dateWord ? parseFlexibleDate(dateWord)! : today(), topic: words.filter((w) => w !== dateWord).join(' ').replace(/^#/, '') || undefined };
 }
 
-// 특전대·인터뷰보다 먼저 등록 (등록된 방의 '아이디/이름/…' 줄을 특전대 결과로 오인하지 않도록)
-// relay: 카운셀링 봇이 /relay 로 넘겨준 글을 처리하는 봇 (아래 relayBot — 취합만, 중복확인은 시다봇 직접)
-export function registerOnline(bot: Telegraf<any>, relay = false) {
-    const run = (fn: (ctx: Ctx, next: () => Promise<void>) => Promise<unknown>) => async (ctx: Ctx, next: () => Promise<void>) => {
-        try {
-            await fn(ctx, next);
-        } catch (err) {
-            console.error('[온라인 방 처리 에러]:', err);
-            await ctx.reply('⚠️ 처리 중 오류가 발생했습니다. 잠시 후 다시 시도하고, 계속되면 관리자에게 알려주세요.').catch(() => {});
-        }
-    };
-    bot.hears(relay ? /^[\/!](취합)(?:@\w+)?(?:\s+(.+))?$/ : /^[\/!](중복확인|취합)(?:@\w+)?(?:\s+(.+))?$/, run((ctx) => command(ctx, ctx.match[1], (ctx.match[2] || '').trim(), relay)));
+async function dupCommand(ctx: Ctx, args: string) {
+    if (ctx.chat.type === 'private') return void (await ctx.reply('👥 /중복확인 은 단체방에서 사용해주세요.'));
+    if (args === '방등록' || args === '방해제') {
+        if (!isSysadmin(ctx.from?.id)) return void (await ctx.reply('⛔ 시스템 관리자만 방을 등록·해제할 수 있습니다.'));
+        await setDupRoom(ctx.chat.id, args === '방등록', ctx.chat.title);
+        return void (await ctx.reply(
+            args === '방등록'
+                ? '✅ 이 방을 중복확인 방으로 등록했습니다.\n같은 인스타 아이디가 다시 올라오면 바로 알리고, 매일 23:50에 올린 사람별 건수를 올립니다. (지금 현황: /중복확인)'
+                : '🔓 중복확인 방 등록을 해제했습니다.'
+        ));
+    }
+    if (!(await isDupRoom(ctx.chat.id))) return void (await ctx.reply('ℹ️ 중복확인 방이 아닙니다. 시스템 관리자가 <code>/중복확인 방등록</code> 으로 등록해주세요.', { parse_mode: 'HTML' }));
+    const { date, topic } = dateAndTopic(args);
+    if (topic) return void (await ctx.reply(`⚠️ 날짜를 확인해주세요: "${args}" (예: /중복확인 11.2)`));
+    await ctx.reply(await instaReport(ctx.chat.id, date), { parse_mode: 'HTML' });
+}
+
+// 특전대·인터뷰보다 먼저 등록 (중복확인 방의 '아이디/이름/…' 줄을 특전대 결과로 오인하지 않도록)
+export function registerOnline(bot: Telegraf<any>) {
+    bot.hears(/^[\/!]중복확인(?:@\w+)?(?:\s+(.+))?$/, run((ctx) => dupCommand(ctx, (ctx.match[1] || '').trim())));
     bot.on('message', (ctx: Ctx, next) => {
         if (ctx.message.migrate_from_chat_id) rooms = null; // 방 ID 변경 (moveGroupChat 이 DB를 옮김)
         return next();
     });
     bot.on('text', run(async (ctx, next) => {
         const text: string = ctx.message.text;
-        if (ctx.chat.type === 'private' || !ctx.from || /^[\/!]/.test(text)) return next();
-        if (await isRoom(ctx.chat.id, 'dup', relay)) {
-            const ids = parseInstaIds(text);
-            if (ids.length) return saveInsta(ctx, ids);
-        }
-        if (await isRoom(ctx.chat.id, 'tally', relay)) {
-            const t = parseTally(text);
-            if (t) return saveTally(ctx, t);
-        }
-        return next();
+        if (ctx.chat.type === 'private' || !ctx.from || /^[\/!]/.test(text) || !(await isDupRoom(ctx.chat.id))) return next();
+        const ids = parseInstaIds(text);
+        return ids.length ? saveInsta(ctx, ids) : next();
     }));
 }
 
-/* ====================== 카운셀링 봇 전달 ====================== */
-// 취합 방에 시다봇을 초대하지 않도록 카운셀링 봇이 받은 글을 /relay 로 넘겨줌. 같은 DB라 주소·비밀값은 cdabot_relay 에 (설정 불필요)
+/* ====================== 카운셀링 봇 전달 (취합) ====================== */
+// 카운셀링 봇이 지역 담당방의 '#주제 #지역' 글과 1:1 대화의 /취합 을 /relay 로 넘겨줌. 같은 DB라 주소·비밀값은 cdabot_relay 에 (설정 불필요)
 // 답(메시지·👍)은 직접 보내지 않고 모아서 돌려줌 → 카운셀링 봇이 자기 이름으로 보냄 (카운셀링 봇 토큰 불필요)
 export type RelayAction = { method: string; payload: any };
 const relayBot = new Telegraf<any>('0:relay'); // 토큰은 쓰지 않음 (텔레그램 호출을 아래에서 가로챔)
@@ -206,7 +187,19 @@ relayBot.use((ctx: Ctx, next) => {
     return next();
 });
 relayBot.catch((err: unknown) => console.error('[카운셀링 봇 전달 처리 에러]:', err));
-registerOnline(relayBot, true);
+// 1:1 대화의 /취합 [주제] [날짜] — 시스템 관리자만 (모든 지역 담당방 것을 모아서)
+relayBot.hears(/^[\/!]취합(?:@\w+)?(?:\s+(.+))?$/, run(async (ctx) => {
+    if (ctx.chat.type !== 'private') return;
+    if (!isSysadmin(ctx.from?.id)) return void (await ctx.reply('⛔ 취합 결과는 시스템 관리자만 볼 수 있습니다.'));
+    const { date, topic } = dateAndTopic((ctx.match[1] || '').trim());
+    await replyLong(ctx, await tallyReport(date, topic));
+}));
+// 지역 담당방의 '#주제 #지역 내용'
+relayBot.on('text', run(async (ctx) => {
+    if (ctx.chat.type === 'private' || !ctx.from || /^[\/!]/.test(ctx.message.text)) return;
+    const t = parseTally(ctx.message.text);
+    if (t) await saveTally(ctx, t);
+}));
 
 export async function handleRelay(update: any): Promise<RelayAction[]> {
     outbox.set(update.update_id, []);
