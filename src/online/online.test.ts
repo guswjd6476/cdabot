@@ -162,3 +162,15 @@ test('취합: 지역 담당방 글(카운셀링 봇이 전달)을 모아 관리�
     await send(202, 'relay.one/이영희/20대', DOBONG, true); // 카운셀링 봇 쪽은 중복확인 안 함
     assert.ok(!reacted());
 });
+
+test('웹에서 정한 실명(cdabot_online_names)이 있으면 현황·중복 알림·명단에 닉네임 대신 실명', async () => {
+    const ROOM = -100666;
+    await send(ADMIN, '/중복확인 방등록', ROOM);
+    await send(207, 'nick.one/가나/20대', ROOM);
+    await query(`INSERT INTO cdabot_online_names (poster_tg, name) VALUES (207, '김실명')`);
+    assert.match(await send(208, 'https://www.instagram.com/nick.one', ROOM), /처음: 김실명/);
+    const report = await send(207, '/중복확인', ROOM);
+    assert.match(report, /• 김실명: 오늘 1건/);
+    assert.doesNotMatch(report, /U207/);
+    assert.match(await send(ADMIN, '/중복확인 명단', ADMIN), /└ 김실명/);
+});

@@ -66,6 +66,8 @@ async function setDupRoom(chatId: number, on: boolean, title?: string) {
 
 // '/중복확인 추가' 로 넣은 기존 아이디 (올린 사람 없음 — 사람별 건수에서 뺌)
 const SEED_TG = 0;
+// 올린 사람 이름: 웹에서 정한 실명(cdabot_online_names), 없으면 올릴 때 텔레그램 이름
+const posterName = (tg: string, fallback: string) => `COALESCE((SELECT n.name FROM cdabot_online_names n WHERE n.poster_tg = ${tg}), ${fallback})`;
 
 // '이름 / 아이디' 줄마다 마지막 칸의 아이디 (+ instagram.com 링크). 이미 이 방에 있는 아이디는 건너뜀
 async function seedInsta(ctx: Ctx, text: string) {
@@ -91,7 +93,7 @@ async function saveInsta(ctx: Ctx, posts: InstaPost[]) {
         const id = p.id;
         const prev = (
             await query(
-                `SELECT poster_tg, poster_name, to_char(posted_date, 'YYYY-MM-DD') AS date, count(*) OVER () AS n FROM cdabot_insta_posts
+                `SELECT poster_tg, ${posterName('poster_tg', 'poster_name')} AS poster_name, to_char(posted_date, 'YYYY-MM-DD') AS date, count(*) OVER () AS n FROM cdabot_insta_posts
                  WHERE chat_id = $1 AND insta_id = $2 ORDER BY id LIMIT 1;`,
                 [String(ctx.chat.id), id]
             )
@@ -112,7 +114,7 @@ async function saveInsta(ctx: Ctx, posts: InstaPost[]) {
 async function instaReport(chatId: number | string, date = today()): Promise<string> {
     const rows = (
         await query(
-            `SELECT (array_agg(poster_name ORDER BY id DESC))[1] AS name,
+            `SELECT ${posterName('poster_tg', '(array_agg(poster_name ORDER BY id DESC))[1]')} AS name,
                     count(*) FILTER (WHERE NOT dup) AS total,
                     count(*) FILTER (WHERE NOT dup AND posted_date = $2) AS today,
                     count(*) FILTER (WHERE dup AND posted_date = $2) AS dup_today
@@ -130,7 +132,7 @@ async function instaReport(chatId: number | string, date = today()): Promise<str
 async function instaList(date: string): Promise<string> {
     const rows = (
         await query(
-            `SELECT insta_id, name, age, residence, relationship, memo, url, poster_name, dup FROM cdabot_insta_posts
+            `SELECT insta_id, name, age, residence, relationship, memo, url, ${posterName('poster_tg', 'poster_name')} AS poster_name, dup FROM cdabot_insta_posts
              WHERE posted_date = $1 AND poster_tg <> ${SEED_TG} ORDER BY id;`,
             [date]
         )
