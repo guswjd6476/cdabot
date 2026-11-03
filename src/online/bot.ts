@@ -5,6 +5,7 @@ import crypto from 'crypto';
 import { Telegraf } from 'telegraf';
 import { isSysadmin } from '../core/engine';
 import { query } from '../db';
+import { parseSlashForms } from '../sida/result';
 import { dayjs, escapeHtml as e, getErrorMessage, nowKst, parseFlexibleDate, replyLong } from '../utils';
 
 type Ctx = any;
@@ -98,11 +99,27 @@ async function seedInsta(ctx: Ctx, text: string) {
     await ctx.reply(`✅ 기존 아이디 ${added}개 추가${ids.size > added ? ` (이미 있던 ${ids.size - added}개 제외)` : ''}. 이제 이 아이디가 올라오면 중복으로 알립니다.`);
 }
 
+const FORM = '지역/인도자/아이디/이름/나이/거주지/이성친구유무/기타사항';
+const REQUIRED = [['region', '지역'], ['guide', '인도자'], ['name', '이름']] as const;
+const formCheck = (lines: string[]) =>
+    `⚠️ <b>양식 확인</b> — 저장하지 않았습니다\n${lines.join('\n')}\n<code>${FORM}</code>\n고쳐서 다시 올려주세요.`;
+
+// 저장 규칙: 이미 올라온 아이디면 양식이 덜 차도 중복으로 저장·알림. 새 아이디는 지역·인도자·이름이 있어야 저장 (없으면 양식 확인 — 저장하면 고쳐 올릴 때 중복이 됨)
+//   링크만 올린 것: 자기가 먼저 올린 양식이면 그 건에 주소만 붙임 (양식·링크를 따로 보낸 경우)
 async function saveInsta(ctx: Ctx, posts: InstaPost[]) {
     const name = [ctx.from.first_name, ctx.from.last_name].filter(Boolean).join(' ') || String(ctx.from.id);
     const dups: string[] = [];
+    const problems: string[] = [];
     for (const p of posts) {
         const id = p.id;
+        const linkOnly = !p.region && !p.guide && !p.name && !p.age && !p.residence && !p.relationship && !p.memo;
+        if (linkOnly && p.url) {
+            const own = await query(
+                `UPDATE cdabot_insta_posts SET url = $4 WHERE id = (SELECT id FROM cdabot_insta_posts WHERE chat_id = $1 AND insta_id = $2 AND poster_tg = $3 ORDER BY id DESC LIMIT 1) RETURNING id;`,
+                [String(ctx.chat.id), id, ctx.from.id, p.url]
+            );
+            if (own.rows.length) continue;
+        }
         const prev = (
             await query(
                 `SELECT poster_tg, ${posterName('cdabot_insta_posts.poster_tg', 'poster_name')} AS poster_name, to_char(posted_date, 'YYYY-MM-DD') AS date, count(*) OVER () AS n FROM cdabot_insta_posts
@@ -110,6 +127,13 @@ async function saveInsta(ctx: Ctx, posts: InstaPost[]) {
                 [String(ctx.chat.id), id]
             )
         ).rows[0];
+        if (!prev) {
+            const missing = linkOnly ? ['양식 줄(링크만 있음)'] : REQUIRED.filter(([k]) => !p[k]).map(([, label]) => label);
+            if (missing.length) {
+                problems.push(`• <b>${e(id)}</b>: ${missing.join('·')} 없음`);
+                continue;
+            }
+        }
         await query(
             `INSERT INTO cdabot_insta_posts (chat_id, insta_id, poster_tg, poster_name, posted_date, dup, name, age, residence, relationship, memo, url, region, guide)
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14);`,
@@ -118,7 +142,8 @@ async function saveInsta(ctx: Ctx, posts: InstaPost[]) {
         const first = Number(prev?.poster_tg) === SEED_TG ? '기존 목록에 있음' : `처음: ${e(prev?.poster_name)} (${md(prev?.date ?? today())})`;
         if (prev) dups.push(`• <b>${e(id)}</b> — ${first}${Number(prev.n) > 1 ? ` · 이미 ${prev.n}번 올라옴` : ''}`);
     }
-    if (dups.length) await ctx.reply(`🚨 <b>중복 인스타</b>\n${dups.join('\n')}`, { parse_mode: 'HTML' });
+    const out = [dups.length ? `🚨 <b>중복 인스타</b>\n${dups.join('\n')}` : '', problems.length ? formCheck(problems) : ''].filter(Boolean);
+    if (out.length) await ctx.reply(out.join('\n\n'), { parse_mode: 'HTML' });
     else await ctx.react('👍').catch(() => {});
 }
 
@@ -261,8 +286,13 @@ export function registerOnline(bot: Telegraf<any>) {
     bot.on(['text', 'photo', 'document'], run(async (ctx, next) => {
         const text: string = ctx.message.text ?? ctx.message.caption ?? '';
         if (ctx.chat.type === 'private' || !ctx.from || !text || /^[\/!]/.test(text) || !(await isDupRoom(ctx.chat.id))) return next();
+        if (parseSlashForms(text).length) return next(); // 특전대 '발/…'·'찾/…' 줄은 특전대 결과로 저장
         const posts = parseInstaPosts(text);
-        return posts.length ? saveInsta(ctx, posts) : next();
+        if (posts.length) return saveInsta(ctx, posts);
+        // 양식처럼 보이는데('/' 두 개 이상인 줄이나 인스타 링크) 아이디를 못 찾음
+        const looksLikeForm = /instagram\.com\//i.test(text) || text.split('\n').some((l) => !/:\/\//.test(l) && l.split('/').length >= 3);
+        if (looksLikeForm) return ctx.reply(formCheck(['• 인스타 아이디를 찾지 못했습니다 (아이디는 영문·숫자·._ 로, 세 번째 칸에)']), { parse_mode: 'HTML' });
+        return next();
     }));
 }
 

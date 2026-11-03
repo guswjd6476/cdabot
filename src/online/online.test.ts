@@ -12,7 +12,7 @@ import { query } from '../db';
 
 const ADMIN = 9000;
 const DUP = -100111;
-const POST = 'emstiy/김지연/20대초중반/성북구 거주예상/국민대학생,자취,본가는 춘천,영문학과\n\nhttps://www.instagram.com/emstiy?dlrf=ZHJqN2NxaDF0YmUx';
+const POST = '성북/홍인도/emstiy/김지연/20대초중반/성북구 거주예상/국민대학생,자취,본가는 춘천,영문학과\n\nhttps://www.instagram.com/emstiy?dlrf=ZHJqN2NxaDF0YmUx';
 
 test('파싱', () => {
     assert.deepEqual(parseInstaIds(POST), ['emstiy']);
@@ -66,8 +66,8 @@ test('중복확인: 등록 전 무시 → 등록 후 첫 건 👍, 같은 아이
 
     assert.equal(await send(201, POST, DUP), '');
     assert.ok(reacted());
-    await send(201, 'other.one/이영희/20대\nhttps://www.instagram.com/other.one', DUP);
-    const dup = await send(202, 'EMSTIY/김지연/20대', DUP);
+    await send(201, '성북/홍인도/other.one/이영희/20대\nhttps://www.instagram.com/other.one', DUP);
+    const dup = await send(202, 'EMSTIY/김지연/20대', DUP); // 이미 올라온 아이디면 양식이 덜 차도 중복
     assert.match(dup, /중복 인스타[\s\S]*emstiy[\s\S]*처음: U201/);
     assert.match(await send(203, 'https://www.instagram.com/emstiy', DUP), /이미 2번 올라옴/);
     assert.equal(await send(201, '오늘 다들 수고했어요', DUP), '');
@@ -87,7 +87,7 @@ test('중복확인 기존 목록 — "이름 / 아이디" 줄을 한 번에 넣�
     assert.match(await send(ADMIN, '/중복확인 추가\n0가나 / Aa.bb1\n다라 / cc_dd22\n마바 / 05_ee3\n사아 / 0000', ROOM), /기존 아이디 3개 추가/);
     assert.match(await send(ADMIN, '/중복확인 추가\n가나 / aa.bb1\n자차 / ff.gg', ROOM), /1개 추가 \(이미 있던 1개 제외\)/);
     assert.match(await send(202, 'https://www.instagram.com/cc_dd22', ROOM), /cc_dd22<\/b> — 기존 목록에 있음/);
-    await send(202, 'new.one/이름/20대', ROOM);
+    await send(202, '노원/인도/new.one/이름/20대', ROOM);
     const report = await send(202, '/온라인', ROOM); // /중복확인 과 같은 명령
     assert.match(report, /U202  오늘 1 · 누적 1 \(중복 1\)/);
     assert.doesNotMatch(report, /기존 목록/);
@@ -108,11 +108,11 @@ test('중복확인 양식 칸·인스타 주소 저장 → 시스템 관리자 1
         { id: 'xy_z', region: '강북', guide: '라마', name: '바사', age: '20대초', residence: '강북구예상', relationship: '무', memo: '어느고, 어느대, 학생회' },
     ]);
 
-    await send(206, 'ab_cd_01/가나/22살/서울거주(어느고, 어느대)/남자친구있음\nhttps://www.instagram.com/ab_cd_01?igsh=xyz', DUP);
+    await send(206, '강북/인도/ab_cd_01/가나/22살/서울거주(어느고, 어느대)/남자친구있음\nhttps://www.instagram.com/ab_cd_01?igsh=xyz', DUP);
     assert.match(await send(206, '/중복확인 명단', DUP), /1:1 대화에서/); // 단체방에는 안 보여줌
     assert.match(await send(206, '/중복확인 명단', 206), /시스템 관리자만/);
     const list = await send(ADMIN, '/중복확인 명단', ADMIN);
-    assert.match(list, /<a href="https:\/\/www\.instagram\.com\/ab_cd_01">ab_cd_01<\/a> \/ 가나 \/ 22살 \/ 서울거주\(어느고, 어느대\) \/ 남자친구있음\n    └ U206/);
+    assert.match(list, /강북 \/ 인도 \/ <a href="https:\/\/www\.instagram\.com\/ab_cd_01">ab_cd_01<\/a> \/ 가나 \/ 22살 \/ 서울거주\(어느고, 어느대\) \/ 남자친구있음\n    └ U206/);
     assert.doesNotMatch(list, /igsh/);
     assert.match(await send(ADMIN, '/중복확인 명단 11.2', ADMIN), /올라온 인스타가 없습니다/);
 });
@@ -126,7 +126,7 @@ test('중복확인 — 캡처 사진 아래 설명(캡션)도 읽음', async () 
         } as any);
         return calls.filter((c) => c.method === 'sendMessage').map((c) => c.payload.text).join('\n');
     };
-    assert.equal(await photo(204, 'cap.one/박하나/20대/노원'), '');
+    assert.equal(await photo(204, '노원/인도/cap.one/박하나/20대'), '');
     assert.ok(reacted());
     assert.match(await photo(205, 'https://www.instagram.com/cap.one'), /중복 인스타[\s\S]*처음: U204/);
     await photo(205, '');
@@ -177,7 +177,7 @@ test('취합: 지역 담당방 글(카운셀링 봇이 전달)을 모아 관리�
 test('웹에서 정한 실명(cdabot_online_names)이 있으면 현황·중복 알림·명단에 닉네임 대신 실명', async () => {
     const ROOM = -100666;
     await send(ADMIN, '/중복확인 방등록', ROOM);
-    await send(207, 'nick.one/가나/20대', ROOM);
+    await send(207, '도봉/인도/nick.one/가나/20대', ROOM);
     await query(`INSERT INTO cdabot_online_names (poster_tg, name) VALUES (207, '김실명')`);
     assert.match(await send(208, 'https://www.instagram.com/nick.one', ROOM), /처음: 김실명/);
     const report = await send(207, '/중복확인', ROOM);
@@ -191,16 +191,44 @@ test('23:50 현황 — 웹에서 명단과 연결한 대원은 지역별로 (정
     await send(ADMIN, '/중복확인 방등록', ROOM);
     await query(`INSERT INTO members VALUES ('M1', '김강북', '강북', '2-3'), ('M2', '이노원', '노원', '1-1'), ('M3', '박강북', '강북', '2-5')`);
     await query(`INSERT INTO cdabot_online_names (poster_tg, name, member_code) VALUES (301, '김강북', 'M1'), (302, '이노원', 'M2'), (303, '박강북', 'M3')`);
-    await send(301, 'r.one/가/1/2/3', ROOM);
-    await send(301, 'r.two/가/1/2/3', ROOM);
-    await send(302, 'r.three/가/1/2/3', ROOM);
-    assert.match(await send(303, 'r.one/가/1/2/3', ROOM), /처음: 김강북/); // 중복 (실명이 여러 명 있어도)
-    await send(304, 'r.four/가/1/2/3', ROOM); // 연결 안 된 대원
+    await send(301, '강북/인도/r.one/가/1', ROOM);
+    await send(301, '강북/인도/r.two/가/1', ROOM);
+    await send(302, '노원/인도/r.three/가/1', ROOM);
+    assert.match(await send(303, '강북/인도/r.one/가/1', ROOM), /처음: 김강북/); // 중복 (실명이 여러 명 있어도)
+    await send(304, '이음/인도/r.four/가/1', ROOM); // 연결 안 된 대원
     calls = [];
     await sendDailyInstaReports(bot.telegram);
     const report = calls.find((c) => c.payload.chat_id === String(ROOM))!.payload.text as string;
     assert.match(report, /온라인 전도 현황<\/b>\n오늘 4건 · 중복 1건 · 올린 대원 4명/);
     assert.match(report, /🔹 <b>노원<\/b> — 오늘 1건 · 누적 1건\n• 이노원  오늘 1 · 누적 1\n\n🔹 <b>강북<\/b> — 오늘 2건 · 누적 2건\n• 김강북  오늘 2 · 누적 2\n• 박강북  오늘 0 · 누적 0 \(중복 1\)/);
     assert.match(report, /\n\n❔ <b>지역 미연결<\/b> — 오늘 1건 · 누적 1건\n• U304  오늘 1 · 누적 1$/);
-    assert.match(await send(ADMIN, '/중복확인 명단', ADMIN), /r\.three<\/b> \/ 가 \/ 1 \/ 2 \/ 3\n    └ 이노원/); // 명단도 실명이 여러 명일 때
+    assert.match(await send(ADMIN, '/중복확인 명단', ADMIN), /노원 \/ 인도 \/ <b>r\.three<\/b> \/ 가 \/ 1\n    └ 이노원/); // 명단도 실명이 여러 명일 때
+});
+
+test('양식 확인 — 틀리면 저장하지 않고 답장, 링크만 따로 보내면 자기 양식에 주소만 붙임, 특전대 줄은 특전대로', async () => {
+    const ROOM = -100888;
+    await send(ADMIN, '/온라인 방등록', ROOM);
+    const bad = await send(401, '강북/f.miss/가나/20대', ROOM); // 인도자 칸 없음
+    assert.match(bad, /양식 확인<\/b> — 저장하지 않았습니다\n• <b>f\.miss<\/b>: 인도자 없음/);
+    assert.match(bad, /지역\/인도자\/아이디\/이름/);
+    assert.match(await send(401, '지역/인도자/아이디/이름/나이', ROOM), /인스타 아이디를 찾지 못했습니다/);
+    assert.match(await send(401, 'https://www.instagram.com/f.new', ROOM), /f\.new<\/b>: 양식 줄\(링크만 있음\) 없음/);
+    assert.equal(await send(401, '오늘 다들 수고했어요', ROOM), ''); // 그냥 대화는 조용히
+    assert.ok(!reacted());
+
+    // 고쳐서 다시 올리면 중복 아님 (처음엔 저장 안 했으므로)
+    assert.equal(await send(401, '강북/전인도/f.miss/가나/20대', ROOM), '');
+    assert.ok(reacted());
+    // 같은 사람이 링크만 따로 → 중복 아님, 주소만 붙음
+    assert.equal(await send(401, 'https://www.instagram.com/f.miss?igsh=1', ROOM), '');
+    assert.ok(reacted());
+    const rows = (await query(`SELECT url, dup FROM cdabot_insta_posts WHERE chat_id = $1 AND insta_id = 'f.miss'`, [String(ROOM)])).rows;
+    assert.deepEqual(rows, [{ url: 'https://www.instagram.com/f.miss', dup: false }]);
+    // 다른 사람이 링크만 → 중복
+    assert.match(await send(402, 'https://www.instagram.com/f.miss', ROOM), /중복 인스타/);
+
+    // 특전대 '발/…' 줄은 온라인에서 건드리지 않고 특전대로 넘김
+    const sida = await send(401, '발/홍길동/여/2001/성북/1/양하늘/인스타', ROOM);
+    assert.doesNotMatch(sida, /양식 확인|중복 인스타/);
+    assert.match(sida, /특전대/); // 특전대가 받아서 처리 (이 방은 특전대 방이 아니라 대원 등록 안내)
 });
