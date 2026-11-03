@@ -28,10 +28,14 @@ export function parseInstaPosts(text: string): InstaPost[] {
         const [name, age, residence, relationship, ...rest] = m[2].split('/');
         Object.assign(get(m[1].toLowerCase()), { name: cell(name), age: cell(age), residence: cell(residence), relationship: cell(relationship), memo: cell(rest.join('/')) });
     }
-    for (const m of text.matchAll(/instagram\.com\/([A-Za-z0-9._]{1,30})/gi)) {
-        const id = m[1].toLowerCase();
-        if (!NOT_PROFILE.has(id)) get(id).url = `https://www.instagram.com/${id}`;
+    const lines = [...posts.values()];
+    const urls = [...text.matchAll(/instagram\.com\/([A-Za-z0-9._]{1,30})/gi)].map((m) => m[1].toLowerCase()).filter((id) => !NOT_PROFILE.has(id));
+    // 양식 줄 하나 + 링크 하나인데 아이디가 다르면 한 건 — 텔레그램이 '__'를 기울임으로 바꾸며 줄의 밑줄을 지움 (링크 아이디가 맞음)
+    if (lines.length === 1 && new Set(urls).size === 1 && lines[0].id !== urls[0]) {
+        posts.clear();
+        posts.set(urls[0], { ...lines[0], id: urls[0] });
     }
+    for (const id of urls) get(id).url = `https://www.instagram.com/${id}`;
     return [...posts.values()];
 }
 export const parseInstaIds = (text: string) => parseInstaPosts(text).map((p) => p.id);
