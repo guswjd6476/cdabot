@@ -93,14 +93,18 @@ test('중복확인 기존 목록 — "이름 / 아이디" 줄을 한 번에 넣�
 
 test('중복확인 양식 칸·인스타 주소 저장 → 시스템 관리자 1:1 /중복확인 명단', async () => {
     assert.deepEqual(parseInstaPosts('아이디/이름/나이/거주지/이성친구유무/기타사항\nab_cd_01/가나/22살/서울거주(어느고, 어느대)/남자친구있음\nhttps://www.instagram.com/ab_cd_01?igsh=xyz'), [
-        { id: 'ab_cd_01', name: '가나', age: '22살', residence: '서울거주(어느고, 어느대)', relationship: '남자친구있음', memo: undefined, url: 'https://www.instagram.com/ab_cd_01' },
+        { id: 'ab_cd_01', region: undefined, guide: undefined, name: '가나', age: '22살', residence: '서울거주(어느고, 어느대)', relationship: '남자친구있음', memo: undefined, url: 'https://www.instagram.com/ab_cd_01' },
     ]);
     assert.equal(parseInstaPosts('ef.gh/다라/-/노원/없음/자취/본가 춘천')[0].memo, '자취/본가 춘천');
     // 텔레그램이 '__' 를 기울임으로 바꿔 줄의 밑줄이 사라져도 링크 아이디로 한 건
     assert.deepEqual(parseInstaPosts('abcd_/가나/20대초/강북/무/학생회\nhttps://www.instagram.com/abcd____?igsh=1'), [
-        { id: 'abcd____', name: '가나', age: '20대초', residence: '강북', relationship: '무', memo: '학생회', url: 'https://www.instagram.com/abcd____' },
+        { id: 'abcd____', region: undefined, guide: undefined, name: '가나', age: '20대초', residence: '강북', relationship: '무', memo: '학생회', url: 'https://www.instagram.com/abcd____' },
     ]);
     assert.equal(parseInstaPosts('aa.bb/가/1/2/3\ncc.dd/나/1/2/3\nhttps://www.instagram.com/ee.ff').length, 3); // 여러 건이면 합치지 않음
+    // 새 양식: 지역/인도자/아이디/이름/나이/거주지/이성친구유무/기타사항 (제목 줄은 무시)
+    assert.deepEqual(parseInstaPosts('지역/인도자/아이디/이름/나이/거주지/이성친구유무/기타사항\n강북/라마/xy_z/바사/20대초/강북구예상/무/어느고, 어느대, 학생회'), [
+        { id: 'xy_z', region: '강북', guide: '라마', name: '바사', age: '20대초', residence: '강북구예상', relationship: '무', memo: '어느고, 어느대, 학생회' },
+    ]);
 
     await send(206, 'ab_cd_01/가나/22살/서울거주(어느고, 어느대)/남자친구있음\nhttps://www.instagram.com/ab_cd_01?igsh=xyz', DUP);
     assert.match(await send(206, '/중복확인 명단', DUP), /1:1 대화에서/); // 단체방에는 안 보여줌

@@ -18,15 +18,23 @@ const NOT_PROFILE = new Set(['p', 'reel', 'reels', 'stories', 'explore', 'tv', '
 
 // 양식 '아이디/이름/나이/거주지/이성친구유무/기타사항' 줄 (아이디는 영문이 있어야 함 — 날짜 10/8/… 오인 방지) + instagram.com/아이디 링크.
 // 같은 아이디의 줄과 링크는 한 건으로 합침. 링크는 추적용 ?뒤 값을 빼고 저장
-export type InstaPost = { id: string; name?: string; age?: string; residence?: string; relationship?: string; memo?: string; url?: string };
+// 새 양식은 '지역/인도자/아이디/…' — 앞 세 칸 중 영문 아이디 모양인 칸이 아이디, 그 앞은 지역·인도자, 뒤는 이름부터
+export type InstaPost = { id: string; region?: string; guide?: string; name?: string; age?: string; residence?: string; relationship?: string; memo?: string; url?: string };
 export function parseInstaPosts(text: string): InstaPost[] {
     const posts = new Map<string, InstaPost>();
     const get = (id: string) => posts.get(id) ?? posts.set(id, { id }).get(id)!;
     const cell = (s?: string) => (s && s.trim() !== '-' ? s.trim() : undefined) || undefined;
-    for (const m of text.matchAll(/^\s*@?([A-Za-z0-9._]{2,30})\s*\/([^\n]*\/[^\n]*)$/gm)) {
-        if (!/[a-z]/i.test(m[1])) continue;
-        const [name, age, residence, relationship, ...rest] = m[2].split('/');
-        Object.assign(get(m[1].toLowerCase()), { name: cell(name), age: cell(age), residence: cell(residence), relationship: cell(relationship), memo: cell(rest.join('/')) });
+    for (const line of text.split('\n')) {
+        const f = line.split('/');
+        if (f.length < 3 || /:\/\/|instagram\.com/i.test(line)) continue; // 링크 줄은 아래에서
+        const at = f.slice(0, 3).findIndex((x) => /^\s*@?[A-Za-z0-9._]{2,30}\s*$/.test(x) && /[a-z]/i.test(x));
+        if (at < 0) continue;
+        const [name, age, residence, relationship, ...rest] = f.slice(at + 1);
+        Object.assign(get(f[at].trim().replace(/^@/, '').toLowerCase()), {
+            region: cell(at >= 1 ? f[0] : undefined),
+            guide: cell(at === 2 ? f[1] : undefined),
+            name: cell(name), age: cell(age), residence: cell(residence), relationship: cell(relationship), memo: cell(rest.join('/')),
+        });
     }
     const lines = [...posts.values()];
     const urls = [...text.matchAll(/instagram\.com\/([A-Za-z0-9._]{1,30})/gi)].map((m) => m[1].toLowerCase()).filter((id) => !NOT_PROFILE.has(id));
@@ -103,9 +111,9 @@ async function saveInsta(ctx: Ctx, posts: InstaPost[]) {
             )
         ).rows[0];
         await query(
-            `INSERT INTO cdabot_insta_posts (chat_id, insta_id, poster_tg, poster_name, posted_date, dup, name, age, residence, relationship, memo, url)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12);`,
-            [String(ctx.chat.id), id, ctx.from.id, name, today(), !!prev, p.name ?? null, p.age ?? null, p.residence ?? null, p.relationship ?? null, p.memo ?? null, p.url ?? null]
+            `INSERT INTO cdabot_insta_posts (chat_id, insta_id, poster_tg, poster_name, posted_date, dup, name, age, residence, relationship, memo, url, region, guide)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14);`,
+            [String(ctx.chat.id), id, ctx.from.id, name, today(), !!prev, p.name ?? null, p.age ?? null, p.residence ?? null, p.relationship ?? null, p.memo ?? null, p.url ?? null, p.region ?? null, p.guide ?? null]
         );
         const first = Number(prev?.poster_tg) === SEED_TG ? '기존 목록에 있음' : `처음: ${e(prev?.poster_name)} (${md(prev?.date ?? today())})`;
         if (prev) dups.push(`• <b>${e(id)}</b> — ${first}${Number(prev.n) > 1 ? ` · 이미 ${prev.n}번 올라옴` : ''}`);
@@ -136,7 +144,7 @@ async function instaReport(chatId: number | string, date = today()): Promise<str
 async function instaList(date: string): Promise<string> {
     const rows = (
         await query(
-            `SELECT insta_id, name, age, residence, relationship, memo, url, ${posterName('poster_tg', 'poster_name')} AS poster_name, dup FROM cdabot_insta_posts
+            `SELECT insta_id, region, guide, name, age, residence, relationship, memo, url, ${posterName('poster_tg', 'poster_name')} AS poster_name, dup FROM cdabot_insta_posts
              WHERE posted_date = $1 AND poster_tg <> ${SEED_TG} ORDER BY id;`,
             [date]
         )
@@ -144,10 +152,11 @@ async function instaList(date: string): Promise<string> {
     if (!rows.length) return `📇 ${md(date)} 올라온 인스타가 없습니다.`;
     const lines = rows.map((r, i) => {
         const id = r.url ? `<a href="${r.url}">${e(r.insta_id)}</a>` : `<b>${e(r.insta_id)}</b>`;
-        const info = [r.name, r.age, r.residence, r.relationship, r.memo].filter(Boolean).map(e).join(' / ');
-        return `${i + 1}. ${id}${info ? ` / ${info}` : ''}\n    └ ${e(r.poster_name)}${r.dup ? ' · 🚨중복' : ''}`;
+        const cells = (xs: (string | null)[]) => xs.filter(Boolean).map((x) => e(x));
+        const line = [...cells([r.region, r.guide]), id, ...cells([r.name, r.age, r.residence, r.relationship, r.memo])].join(' / ');
+        return `${i + 1}. ${line}\n    └ ${e(r.poster_name)}${r.dup ? ' · 🚨중복' : ''}`;
     });
-    return `📇 <b>${md(date)} 인스타 명단</b> (${rows.length}건)\n<i>아이디/이름/나이/거주지/이성친구유무/기타 └ 올린 사람</i>\n\n${lines.join('\n')}`;
+    return `📇 <b>${md(date)} 인스타 명단</b> (${rows.length}건)\n<i>지역/인도자/아이디/이름/나이/거주지/이성친구유무/기타 └ 올린 사람</i>\n\n${lines.join('\n')}`;
 }
 
 // 매일 23:50 (bot.ts 스케줄) — 중복확인 방마다 오늘 현황
