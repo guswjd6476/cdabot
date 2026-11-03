@@ -62,7 +62,7 @@ test('중복확인: 등록 전 무시 → 등록 후 첫 건 👍, 같은 아이
     assert.match(await send(201, '/중복확인 방등록', DUP), /시스템 관리자만/);
     await send(201, POST, DUP);
     assert.ok(!reacted());
-    assert.match(await send(ADMIN, '/중복확인 방등록', DUP), /중복확인 방으로 등록/);
+    assert.match(await send(ADMIN, '/중복확인 방등록', DUP), /온라인 전도 방으로 등록/);
 
     assert.equal(await send(201, POST, DUP), '');
     assert.ok(reacted());
@@ -88,7 +88,7 @@ test('중복확인 기존 목록 — "이름 / 아이디" 줄을 한 번에 넣�
     assert.match(await send(ADMIN, '/중복확인 추가\n가나 / aa.bb1\n자차 / ff.gg', ROOM), /1개 추가 \(이미 있던 1개 제외\)/);
     assert.match(await send(202, 'https://www.instagram.com/cc_dd22', ROOM), /cc_dd22<\/b> — 기존 목록에 있음/);
     await send(202, 'new.one/이름/20대', ROOM);
-    const report = await send(202, '/중복확인', ROOM);
+    const report = await send(202, '/온라인', ROOM); // /중복확인 과 같은 명령
     assert.match(report, /U202  오늘 1 · 누적 1 \(중복 1\)/);
     assert.doesNotMatch(report, /기존 목록/);
 });
@@ -199,7 +199,7 @@ test('23:50 현황 — 웹에서 명단과 연결한 대원은 지역별로 (정
     calls = [];
     await sendDailyInstaReports(bot.telegram);
     const report = calls.find((c) => c.payload.chat_id === String(ROOM))!.payload.text as string;
-    assert.match(report, /인스타 발굴 현황<\/b>\n오늘 4건 · 중복 1건 · 올린 대원 4명/);
+    assert.match(report, /온라인 전도 현황<\/b>\n오늘 4건 · 중복 1건 · 올린 대원 4명/);
     assert.match(report, /🔹 <b>노원<\/b> — 오늘 1건 · 누적 1건\n• 이노원  오늘 1 · 누적 1\n\n🔹 <b>강북<\/b> — 오늘 2건 · 누적 2건\n• 김강북  오늘 2 · 누적 2\n• 박강북  오늘 0 · 누적 0 \(중복 1\)/);
     assert.match(report, /\n\n❔ <b>지역 미연결<\/b> — 오늘 1건 · 누적 1건\n• U304  오늘 1 · 누적 1$/);
     assert.match(await send(ADMIN, '/중복확인 명단', ADMIN), /r\.three<\/b> \/ 가 \/ 1 \/ 2 \/ 3\n    └ 이노원/); // 명단도 실명이 여러 명일 때

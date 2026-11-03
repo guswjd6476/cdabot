@@ -1,5 +1,5 @@
 // 온라인 업무 (특전대·인터뷰와 별개, 조직 없음)
-//   /중복확인 방등록 (시스템 관리자, 시다봇이 있는 방) — 같은 인스타 아이디가 다시 올라오면 바로 알림, 매일 23:50 올린 사람별 건수
+//   온라인 전도 — /온라인 방등록 (시스템 관리자, 시다봇이 있는 방): 올라온 인스타 양식 저장, 같은 아이디면 바로 중복 알림, 매일 23:50 지역별 현황 (/중복확인 도 같은 명령)
 //   취합 — 카운셀링 봇이 지역 담당방의 '#주제 #지역 내용' 글을 넘겨줌 → 시스템 관리자가 카운셀링 봇 1:1 대화에서 /취합
 import crypto from 'crypto';
 import { Telegraf } from 'telegraf';
@@ -148,7 +148,7 @@ async function instaReport(chatId: number | string, date = today()): Promise<str
         return `${reg === NO_REGION ? '❔' : '🔹'} <b>${reg}</b> — 오늘 ${sum(xs, 'today')}건 · 누적 ${sum(xs, 'total')}건\n${people.join('\n')}`;
     });
     const day = `${md(date)}(${'일월화수목금토'[dayjs(date).day()]})`;
-    const head = `📊 <b>${day} 인스타 발굴 현황</b>\n오늘 ${sum(rows, 'today')}건${sum(rows, 'dup') ? ` · 중복 ${sum(rows, 'dup')}건` : ''} · 올린 대원 ${rows.filter((r) => r.today || r.dup).length}명`;
+    const head = `📊 <b>${day} 온라인 전도 현황</b>\n오늘 ${sum(rows, 'today')}건${sum(rows, 'dup') ? ` · 중복 ${sum(rows, 'dup')}건` : ''} · 올린 대원 ${rows.filter((r) => r.today || r.dup).length}명`;
     return blocks.length ? `${head}\n\n${blocks.join('\n\n')}` : `${head}\n\n아직 올라온 건이 없습니다.`;
 }
 
@@ -168,7 +168,7 @@ async function instaList(date: string): Promise<string> {
         const line = [...cells([r.region, r.guide]), id, ...cells([r.name, r.age, r.residence, r.relationship, r.memo])].join(' / ');
         return `${i + 1}. ${line}\n    └ ${e(r.poster_name)}${r.dup ? ' · 🚨중복' : ''}`;
     });
-    return `📇 <b>${md(date)} 인스타 명단</b> (${rows.length}건)\n<i>지역/인도자/아이디/이름/나이/거주지/이성친구유무/기타 └ 올린 사람</i>\n\n${lines.join('\n')}`;
+    return `📇 <b>${md(date)} 온라인 전도 명단</b> (${rows.length}건)\n<i>지역/인도자/아이디/이름/나이/거주지/이성친구유무/기타 └ 올린 사람</i>\n\n${lines.join('\n')}`;
 }
 
 // 매일 23:50 (bot.ts 스케줄) — 중복확인 방마다 오늘 현황
@@ -223,36 +223,36 @@ function dateAndTopic(args: string) {
 async function dupCommand(ctx: Ctx, args: string) {
     const list = args.match(/^명단(?:\s+(.*))?$/);
     if (list) {
-        if (ctx.chat.type !== 'private') return void (await ctx.reply('🔒 명단은 개인정보라 봇과 1:1 대화에서 /중복확인 명단 으로 봐주세요.'));
+        if (ctx.chat.type !== 'private') return void (await ctx.reply('🔒 명단은 개인정보라 봇과 1:1 대화에서 /온라인 명단 으로 봐주세요.'));
         if (!isSysadmin(ctx.from?.id)) return void (await ctx.reply('⛔ 명단은 시스템 관리자만 볼 수 있습니다.'));
         const d = list[1] ? parseFlexibleDate(list[1]) : today();
-        if (!d) return void (await ctx.reply(`⚠️ 날짜를 확인해주세요: "${list[1]}" (예: /중복확인 명단 11.3)`));
+        if (!d) return void (await ctx.reply(`⚠️ 날짜를 확인해주세요: "${list[1]}" (예: /온라인 명단 11.3)`));
         return replyLong(ctx, await instaList(d), { link_preview_options: { is_disabled: true } });
     }
-    if (ctx.chat.type === 'private') return void (await ctx.reply('👥 /중복확인 은 단체방에서 사용해주세요. (명단: /중복확인 명단)'));
+    if (ctx.chat.type === 'private') return void (await ctx.reply('👥 /온라인 은 온라인 전도 방에서 사용해주세요. (명단: /온라인 명단)'));
     if (args === '방등록' || args === '방해제') {
         if (!isSysadmin(ctx.from?.id)) return void (await ctx.reply('⛔ 시스템 관리자만 방을 등록·해제할 수 있습니다.'));
         await setDupRoom(ctx.chat.id, args === '방등록', ctx.chat.title);
         return void (await ctx.reply(
             args === '방등록'
-                ? '✅ 이 방을 중복확인 방으로 등록했습니다.\n같은 인스타 아이디가 다시 올라오면 바로 알리고, 매일 23:50에 올린 사람별 건수를 올립니다. (지금 현황: /중복확인)'
-                : '🔓 중복확인 방 등록을 해제했습니다.'
+                ? '✅ 이 방을 온라인 전도 방으로 등록했습니다.\n올라온 인스타 양식을 저장하고, 같은 아이디가 다시 올라오면 바로 알리고, 매일 23:50에 지역별 현황을 올립니다. (지금 현황: /온라인)'
+                : '🔓 온라인 전도 방 등록을 해제했습니다.'
         ));
     }
-    if (!(await isDupRoom(ctx.chat.id))) return void (await ctx.reply('ℹ️ 중복확인 방이 아닙니다. 시스템 관리자가 <code>/중복확인 방등록</code> 으로 등록해주세요.', { parse_mode: 'HTML' }));
+    if (!(await isDupRoom(ctx.chat.id))) return void (await ctx.reply('ℹ️ 온라인 전도 방이 아닙니다. 시스템 관리자가 <code>/온라인 방등록</code> 으로 등록해주세요.', { parse_mode: 'HTML' }));
     const seed = args.match(/^추가(?:\s+([\s\S]*))?$/);
     if (seed) {
         if (!isSysadmin(ctx.from?.id)) return void (await ctx.reply('⛔ 시스템 관리자만 기존 아이디를 넣을 수 있습니다.'));
         return seedInsta(ctx, seed[1] || '');
     }
     const { date, topic } = dateAndTopic(args);
-    if (topic) return void (await ctx.reply(`⚠️ 날짜를 확인해주세요: "${args}" (예: /중복확인 11.2)`));
+    if (topic) return void (await ctx.reply(`⚠️ 날짜를 확인해주세요: "${args}" (예: /온라인 11.2)`));
     await ctx.reply(await instaReport(ctx.chat.id, date), { parse_mode: 'HTML' });
 }
 
 // 특전대·인터뷰보다 먼저 등록 (중복확인 방의 '아이디/이름/…' 줄을 특전대 결과로 오인하지 않도록)
 export function registerOnline(bot: Telegraf<any>) {
-    bot.hears(/^[\/!]중복확인(?:@\w+)?(?:\s+([\s\S]+))?$/, run((ctx) => dupCommand(ctx, (ctx.match[1] || '').trim())));
+    bot.hears(/^[\/!](?:온라인|중복확인)(?:@\w+)?(?:\s+([\s\S]+))?$/, run((ctx) => dupCommand(ctx, (ctx.match[1] || '').trim())));
     bot.on('message', (ctx: Ctx, next) => {
         if (ctx.message.migrate_from_chat_id) rooms = null; // 방 ID 변경 (moveGroupChat 이 DB를 옮김)
         return next();
