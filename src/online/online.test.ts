@@ -91,6 +91,22 @@ test('중복확인 기존 목록 — "이름 / 아이디" 줄을 한 번에 넣�
     assert.doesNotMatch(report, /기존 목록/);
 });
 
+test('중복확인 — 캡처 사진 아래 설명(캡션)도 읽음', async () => {
+    const photo = async (from: number, caption: string) => {
+        calls = [];
+        await bot.handleUpdate({
+            update_id: ++n,
+            message: { message_id: 5000 + n, date: 0, chat: { id: DUP, type: 'supergroup' }, from: { id: from, is_bot: false, first_name: `U${from}` }, photo: [{ file_id: 'x', file_unique_id: 'x', width: 1, height: 1 }], caption },
+        } as any);
+        return calls.filter((c) => c.method === 'sendMessage').map((c) => c.payload.text).join('\n');
+    };
+    assert.equal(await photo(204, 'cap.one/박하나/20대/노원'), '');
+    assert.ok(reacted());
+    assert.match(await photo(205, 'https://www.instagram.com/cap.one'), /중복 인스타[\s\S]*처음: U204/);
+    await photo(205, '');
+    assert.ok(!reacted()); // 설명 없는 사진은 무시
+});
+
 test('카운셀링 봇 전달 주소·비밀값 — 시작할 때 DB에, 비밀값은 다시 시작해도 유지', async () => {
     assert.equal(await relaySecretOk('x'), false);
     await publishRelay('https://acc.alwaysdata.net/cdabot/webhook');

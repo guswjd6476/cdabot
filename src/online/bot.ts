@@ -189,9 +189,10 @@ export function registerOnline(bot: Telegraf<any>) {
         if (ctx.message.migrate_from_chat_id) rooms = null; // 방 ID 변경 (moveGroupChat 이 DB를 옮김)
         return next();
     });
-    bot.on('text', run(async (ctx, next) => {
-        const text: string = ctx.message.text;
-        if (ctx.chat.type === 'private' || !ctx.from || /^[\/!]/.test(text) || !(await isDupRoom(ctx.chat.id))) return next();
+    // 글만 올린 것 + 인스타 캡처 사진·파일 아래 설명(캡션)
+    bot.on(['text', 'photo', 'document'], run(async (ctx, next) => {
+        const text: string = ctx.message.text ?? ctx.message.caption ?? '';
+        if (ctx.chat.type === 'private' || !ctx.from || !text || /^[\/!]/.test(text) || !(await isDupRoom(ctx.chat.id))) return next();
         const ids = parseInstaIds(text);
         return ids.length ? saveInsta(ctx, ids) : next();
     }));
