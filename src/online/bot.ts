@@ -16,13 +16,25 @@ const NOT_PROFILE = new Set(['p', 'reel', 'reels', 'stories', 'explore', 'tv', '
 
 /* ====================== 파싱 ====================== */
 
-// 인스타 아이디: instagram.com/아이디 링크, 또는 '아이디/이름/…' 줄의 첫 칸 (영문이 있어야 함 — 날짜 10/8/… 오인 방지)
-export function parseInstaIds(text: string): string[] {
-    const ids = new Set<string>();
-    for (const m of text.matchAll(/instagram\.com\/([A-Za-z0-9._]{1,30})/gi)) if (!NOT_PROFILE.has(m[1].toLowerCase())) ids.add(m[1].toLowerCase());
-    for (const m of text.matchAll(/^\s*@?([A-Za-z0-9._]{2,30})\s*\/[^/\n]*\//gm)) if (/[a-z]/i.test(m[1])) ids.add(m[1].toLowerCase());
-    return [...ids];
+// 양식 '아이디/이름/나이/거주지/이성친구유무/기타사항' 줄 (아이디는 영문이 있어야 함 — 날짜 10/8/… 오인 방지) + instagram.com/아이디 링크.
+// 같은 아이디의 줄과 링크는 한 건으로 합침. 링크는 추적용 ?뒤 값을 빼고 저장
+export type InstaPost = { id: string; name?: string; age?: string; residence?: string; relationship?: string; memo?: string; url?: string };
+export function parseInstaPosts(text: string): InstaPost[] {
+    const posts = new Map<string, InstaPost>();
+    const get = (id: string) => posts.get(id) ?? posts.set(id, { id }).get(id)!;
+    const cell = (s?: string) => (s && s.trim() !== '-' ? s.trim() : undefined) || undefined;
+    for (const m of text.matchAll(/^\s*@?([A-Za-z0-9._]{2,30})\s*\/([^\n]*\/[^\n]*)$/gm)) {
+        if (!/[a-z]/i.test(m[1])) continue;
+        const [name, age, residence, relationship, ...rest] = m[2].split('/');
+        Object.assign(get(m[1].toLowerCase()), { name: cell(name), age: cell(age), residence: cell(residence), relationship: cell(relationship), memo: cell(rest.join('/')) });
+    }
+    for (const m of text.matchAll(/instagram\.com\/([A-Za-z0-9._]{1,30})/gi)) {
+        const id = m[1].toLowerCase();
+        if (!NOT_PROFILE.has(id)) get(id).url = `https://www.instagram.com/${id}`;
+    }
+    return [...posts.values()];
 }
+export const parseInstaIds = (text: string) => parseInstaPosts(text).map((p) => p.id);
 
 // '#주제 #도봉 내용' → 주제(지역이 아닌 첫 태그) + 지역(목록에 있는 첫 태그, 끝의 '구'는 무시) + 두 태그를 뺀 나머지 내용. 둘 중 하나라도 없으면 null
 export type Tally = { topic: string; region: string; content: string };
@@ -72,10 +84,11 @@ async function seedInsta(ctx: Ctx, text: string) {
     await ctx.reply(`✅ 기존 아이디 ${added}개 추가${ids.size > added ? ` (이미 있던 ${ids.size - added}개 제외)` : ''}. 이제 이 아이디가 올라오면 중복으로 알립니다.`);
 }
 
-async function saveInsta(ctx: Ctx, ids: string[]) {
+async function saveInsta(ctx: Ctx, posts: InstaPost[]) {
     const name = [ctx.from.first_name, ctx.from.last_name].filter(Boolean).join(' ') || String(ctx.from.id);
     const dups: string[] = [];
-    for (const id of ids) {
+    for (const p of posts) {
+        const id = p.id;
         const prev = (
             await query(
                 `SELECT poster_tg, poster_name, to_char(posted_date, 'YYYY-MM-DD') AS date, count(*) OVER () AS n FROM cdabot_insta_posts
@@ -83,9 +96,11 @@ async function saveInsta(ctx: Ctx, ids: string[]) {
                 [String(ctx.chat.id), id]
             )
         ).rows[0];
-        await query(`INSERT INTO cdabot_insta_posts (chat_id, insta_id, poster_tg, poster_name, posted_date, dup) VALUES ($1, $2, $3, $4, $5, $6);`, [
-            String(ctx.chat.id), id, ctx.from.id, name, today(), !!prev,
-        ]);
+        await query(
+            `INSERT INTO cdabot_insta_posts (chat_id, insta_id, poster_tg, poster_name, posted_date, dup, name, age, residence, relationship, memo, url)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12);`,
+            [String(ctx.chat.id), id, ctx.from.id, name, today(), !!prev, p.name ?? null, p.age ?? null, p.residence ?? null, p.relationship ?? null, p.memo ?? null, p.url ?? null]
+        );
         const first = Number(prev?.poster_tg) === SEED_TG ? '기존 목록에 있음' : `처음: ${e(prev?.poster_name)} (${md(prev?.date ?? today())})`;
         if (prev) dups.push(`• <b>${e(id)}</b> — ${first}${Number(prev.n) > 1 ? ` · 이미 ${prev.n}번 올라옴` : ''}`);
     }
@@ -109,6 +124,24 @@ async function instaReport(chatId: number | string, date = today()): Promise<str
     const sum = (k: 'today' | 'dup') => rows.reduce((s, r) => s + r[k], 0);
     const lines = rows.map((r) => `• ${e(r.name)}: 오늘 ${r.today}건 · 전체 ${r.total}건${r.dup ? ` (오늘 중복 ${r.dup})` : ''}`);
     return `📊 <b>${md(date)} 인스타 발굴 현황</b>\n${lines.join('\n') || '아직 올라온 건이 없습니다.'}\n\n오늘 합계 ${sum('today')}건${sum('dup') ? ` · 중복 ${sum('dup')}건` : ''}`;
+}
+
+// 그날 올라온 양식 내용 (모든 중복확인 방, 기존 목록 제외) — 개인정보라 시스템 관리자 1:1 에서만
+async function instaList(date: string): Promise<string> {
+    const rows = (
+        await query(
+            `SELECT insta_id, name, age, residence, relationship, memo, url, poster_name, dup FROM cdabot_insta_posts
+             WHERE posted_date = $1 AND poster_tg <> ${SEED_TG} ORDER BY id;`,
+            [date]
+        )
+    ).rows;
+    if (!rows.length) return `📇 ${md(date)} 올라온 인스타가 없습니다.`;
+    const lines = rows.map((r, i) => {
+        const id = r.url ? `<a href="${r.url}">${e(r.insta_id)}</a>` : `<b>${e(r.insta_id)}</b>`;
+        const info = [r.name, r.age, r.residence, r.relationship, r.memo].filter(Boolean).map(e).join(' / ');
+        return `${i + 1}. ${id}${info ? ` / ${info}` : ''}\n    └ ${e(r.poster_name)}${r.dup ? ' · 🚨중복' : ''}`;
+    });
+    return `📇 <b>${md(date)} 인스타 명단</b> (${rows.length}건)\n<i>아이디/이름/나이/거주지/이성친구유무/기타 └ 올린 사람</i>\n\n${lines.join('\n')}`;
 }
 
 // 매일 23:50 (bot.ts 스케줄) — 중복확인 방마다 오늘 현황
@@ -161,7 +194,15 @@ function dateAndTopic(args: string) {
 }
 
 async function dupCommand(ctx: Ctx, args: string) {
-    if (ctx.chat.type === 'private') return void (await ctx.reply('👥 /중복확인 은 단체방에서 사용해주세요.'));
+    const list = args.match(/^명단(?:\s+(.*))?$/);
+    if (list) {
+        if (ctx.chat.type !== 'private') return void (await ctx.reply('🔒 명단은 개인정보라 봇과 1:1 대화에서 /중복확인 명단 으로 봐주세요.'));
+        if (!isSysadmin(ctx.from?.id)) return void (await ctx.reply('⛔ 명단은 시스템 관리자만 볼 수 있습니다.'));
+        const d = list[1] ? parseFlexibleDate(list[1]) : today();
+        if (!d) return void (await ctx.reply(`⚠️ 날짜를 확인해주세요: "${list[1]}" (예: /중복확인 명단 11.3)`));
+        return replyLong(ctx, await instaList(d), { link_preview_options: { is_disabled: true } });
+    }
+    if (ctx.chat.type === 'private') return void (await ctx.reply('👥 /중복확인 은 단체방에서 사용해주세요. (명단: /중복확인 명단)'));
     if (args === '방등록' || args === '방해제') {
         if (!isSysadmin(ctx.from?.id)) return void (await ctx.reply('⛔ 시스템 관리자만 방을 등록·해제할 수 있습니다.'));
         await setDupRoom(ctx.chat.id, args === '방등록', ctx.chat.title);
@@ -193,8 +234,8 @@ export function registerOnline(bot: Telegraf<any>) {
     bot.on(['text', 'photo', 'document'], run(async (ctx, next) => {
         const text: string = ctx.message.text ?? ctx.message.caption ?? '';
         if (ctx.chat.type === 'private' || !ctx.from || !text || /^[\/!]/.test(text) || !(await isDupRoom(ctx.chat.id))) return next();
-        const ids = parseInstaIds(text);
-        return ids.length ? saveInsta(ctx, ids) : next();
+        const posts = parseInstaPosts(text);
+        return posts.length ? saveInsta(ctx, posts) : next();
     }));
 }
 

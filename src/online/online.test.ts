@@ -7,7 +7,7 @@ import { Telegraf, Telegram } from 'telegraf';
 import { runMigrations, setQueryable } from '../db';
 import { registerCore } from '../core/engine';
 import { registerSida } from '../sida/bot';
-import { handleRelay, parseInstaIds, parseTally, publishRelay, registerOnline, relaySecretOk, sendDailyInstaReports } from './bot';
+import { handleRelay, parseInstaIds, parseInstaPosts, parseTally, publishRelay, registerOnline, relaySecretOk, sendDailyInstaReports } from './bot';
 import { query } from '../db';
 
 const ADMIN = 9000;
@@ -89,6 +89,21 @@ test('중복확인 기존 목록 — "이름 / 아이디" 줄을 한 번에 넣�
     const report = await send(202, '/중복확인', ROOM);
     assert.match(report, /U202: 오늘 1건 · 전체 1건 \(오늘 중복 1\)/);
     assert.doesNotMatch(report, /기존 목록/);
+});
+
+test('중복확인 양식 칸·인스타 주소 저장 → 시스템 관리자 1:1 /중복확인 명단', async () => {
+    assert.deepEqual(parseInstaPosts('아이디/이름/나이/거주지/이성친구유무/기타사항\nab_cd_01/가나/22살/서울거주(어느고, 어느대)/남자친구있음\nhttps://www.instagram.com/ab_cd_01?igsh=xyz'), [
+        { id: 'ab_cd_01', name: '가나', age: '22살', residence: '서울거주(어느고, 어느대)', relationship: '남자친구있음', memo: undefined, url: 'https://www.instagram.com/ab_cd_01' },
+    ]);
+    assert.equal(parseInstaPosts('ef.gh/다라/-/노원/없음/자취/본가 춘천')[0].memo, '자취/본가 춘천');
+
+    await send(206, 'ab_cd_01/가나/22살/서울거주(어느고, 어느대)/남자친구있음\nhttps://www.instagram.com/ab_cd_01?igsh=xyz', DUP);
+    assert.match(await send(206, '/중복확인 명단', DUP), /1:1 대화에서/); // 단체방에는 안 보여줌
+    assert.match(await send(206, '/중복확인 명단', 206), /시스템 관리자만/);
+    const list = await send(ADMIN, '/중복확인 명단', ADMIN);
+    assert.match(list, /<a href="https:\/\/www\.instagram\.com\/ab_cd_01">ab_cd_01<\/a> \/ 가나 \/ 22살 \/ 서울거주\(어느고, 어느대\) \/ 남자친구있음\n    └ U206/);
+    assert.doesNotMatch(list, /igsh/);
+    assert.match(await send(ADMIN, '/중복확인 명단 11.2', ADMIN), /올라온 인스타가 없습니다/);
 });
 
 test('중복확인 — 캡처 사진 아래 설명(캡션)도 읽음', async () => {
