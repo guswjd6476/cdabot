@@ -68,7 +68,7 @@ export async function adminFindsOfDigs(orgId: number, moduleKey: string, from: s
              ) ev ON ev.at IS NOT NULL
              WHERE r.org_id = $1 AND r.kind = 'dig' AND r.deleted_at IS NULL AND r.name IS NOT NULL
                AND EXISTS (SELECT 1 FROM cdabot_periods p WHERE p.org_id = r.org_id AND p.module_key = $2
-                           AND r.activity_date >= p.week_start AND r.activity_date < p.week_start + 7)
+                           AND r.activity_date >= p.week_start AND r.activity_date < p.week_start + p.days)
                AND ev.at::date BETWEEN $3::date AND $4::date AND ev.at::date >= r.activity_date
              ORDER BY r.activity_date, r.id;`,
             [orgId, moduleKey, from, to]

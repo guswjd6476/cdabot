@@ -9,12 +9,13 @@ export const MODULE_KEY = 'special';
 export interface Period {
     id: number;
     org_id: number;
-    week_start: string; // YYYY-MM-DD (월요일)
+    week_start: string; // YYYY-MM-DD 시작일 (아무 요일)
+    days: number; // 시작일부터 며칠 (1~7). 요일별 데이터는 실제 요일(1=월…7=일)로 저장 — 7일 이하라 겹치지 않음
     status: 'open' | 'closed';
     extra_editors: number[];
     created_at: string;
 }
-const PERIOD_SELECT = `SELECT id, org_id, week_start::text AS week_start, status, extra_editors, created_at FROM cdabot_periods`;
+const PERIOD_SELECT = `SELECT id, org_id, week_start::text AS week_start, days, status, extra_editors, created_at FROM cdabot_periods`;
 
 // 대원이 지금 제출·수정할 수 있는 주차: 열린 주차 중 최신 (마감됐어도 수정 허용된 사람은 포함)
 export async function getEditablePeriod(orgId: number, userId: number): Promise<Period | undefined> {
@@ -35,16 +36,27 @@ export async function getLatestPeriod(orgId: number): Promise<Period | undefined
     return (await query(`${PERIOD_SELECT} WHERE org_id = $1 AND module_key = $2 ORDER BY week_start DESC LIMIT 1;`, [orgId, MODULE_KEY])).rows[0];
 }
 
-export async function getPeriodByWeek(orgId: number, weekStart: string): Promise<Period | undefined> {
-    return (await query(`${PERIOD_SELECT} WHERE org_id = $1 AND module_key = $2 AND week_start = $3;`, [orgId, MODULE_KEY, weekStart])).rows[0];
+// date 가 들어 있는 기간
+export async function getPeriodAt(orgId: number, date: string): Promise<Period | undefined> {
+    return (
+        await query(`${PERIOD_SELECT} WHERE org_id = $1 AND module_key = $2 AND week_start <= $3::date AND $3::date < week_start + days ORDER BY week_start DESC LIMIT 1;`, [
+            orgId,
+            MODULE_KEY,
+            date,
+        ])
+    ).rows[0];
 }
 
-export async function createPeriod(orgId: number, weekStart: string): Promise<Period | undefined> {
+// 다른 기간과 하루라도 겹치면 만들지 않음 (undefined)
+export async function createPeriod(orgId: number, start: string, days = 7): Promise<Period | undefined> {
     const res = await query(
-        `INSERT INTO cdabot_periods (org_id, module_key, week_start) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING RETURNING id;`,
-        [orgId, MODULE_KEY, weekStart]
+        `INSERT INTO cdabot_periods (org_id, module_key, week_start, days)
+         SELECT $1, $2, $3::date, $4::int
+         WHERE NOT EXISTS (SELECT 1 FROM cdabot_periods WHERE org_id = $1 AND module_key = $2 AND week_start < $3::date + $4::int AND $3::date < week_start + days)
+         ON CONFLICT DO NOTHING RETURNING id;`,
+        [orgId, MODULE_KEY, start, days]
     );
-    return res.rows[0] ? getPeriodByWeek(orgId, weekStart) : undefined;
+    return res.rows[0] ? getPeriodById(orgId, res.rows[0].id) : undefined;
 }
 
 export async function setPeriodStatus(orgId: number, periodId: number, status: 'open' | 'closed') {

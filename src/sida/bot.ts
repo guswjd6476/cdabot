@@ -22,10 +22,20 @@ const weekStartOf = (ymd: string) => {
     const d = dayjs(ymd);
     return d.subtract((d.day() + 6) % 7, 'day').format('YYYY-MM-DD');
 };
-const dateOf = (weekStart: string, w: number) => dayjs(weekStart).add(w - 1, 'day');
-const weekLabel = (ws: string) => `${dayjs(ws).format('M/D')}~${dateOf(ws, 7).format('M/D')}`;
 const chunk = <X>(items: X[], n: number) => Array.from({ length: Math.ceil(items.length / n) }, (_, i) => items.slice(i * n, i * n + n));
 const weekdayOf = (ymd: string) => dayjs(ymd).day() || 7; // 월=1 … 일=7
+// 기간 = 시작일(week_start, 아무 요일)부터 days 일. 요일별 데이터는 실제 요일로 저장 (7일 이하라 한 요일은 한 날짜)
+const periodWeekdays = (p: S.Period) => Array.from({ length: p.days }, (_, i) => (dayjs(p.week_start).day() + i) % 7 || 7);
+const dateOf = (p: S.Period, w: number) => dayjs(p.week_start).add((w - weekdayOf(p.week_start) + 7) % 7, 'day');
+const endOf = (p: S.Period) => dayjs(p.week_start).add(p.days - 1, 'day').format('YYYY-MM-DD');
+const rangeLabel = (from: string, to: string) => `${dayjs(from).format('M/D')}~${dayjs(to).format('M/D')}`;
+const weekLabel = (p: S.Period) => rangeLabel(p.week_start, endOf(p));
+// 결과 집계 기간: date 가 든 특전대 기간, 없으면 그 주 월~일
+async function resultRange(orgId: number, date: string) {
+    const period = await S.getPeriodAt(orgId, date);
+    const from = period?.week_start ?? weekStartOf(date);
+    return { period, from, to: period ? endOf(period) : dayjs(from).add(6, 'day').format('YYYY-MM-DD'), name: period ? '특전대 기간' : '이번 주' };
+}
 
 async function show(ctx: Ctx, html: string, buttons?: Buttons) {
     const kb = buttons ? Markup.inlineKeyboard(buttons) : {};
@@ -90,16 +100,16 @@ async function loadWeek(orgId: number, period?: S.Period) {
 
 const weeklyMinutes = (days?: S.WeekDays) => (days ? T.WEEKDAYS.reduce((sum, w) => sum + (days[w]?.unavailable ? 0 : T.totalMinutes(days[w]?.slots || [])), 0) : 0);
 
-function renderPersonWeek(ws: string, days: S.WeekDays | undefined, min: number): string {
-    const lines = T.WEEKDAYS.map((w) => {
+function renderPersonWeek(p: S.Period, days: S.WeekDays | undefined, min: number): string {
+    const lines = periodWeekdays(p).map((w) => {
         const d = days?.[w];
         const st = T.dayStatus(d, min);
-        const label = `${T.DAY_NAMES[w]} ${dateOf(ws, w).format('M/D')}`;
+        const label = `${T.DAY_NAMES[w]} ${dateOf(p, w).format('M/D')}`;
         if (!d || st === 'unavailable' || st === 'missing') return `• ${label}: ${T.STATUS_LABEL[st]}`;
         return `• ${label}: ${d.slots.map(T.fmtSlot).join(', ') || '-'} → <b>${T.fmtHours(T.totalMinutes(d.slots))}</b> ${T.STATUS_LABEL[st]}`;
     });
     lines.push(`주간 활동 가능 시간 합계: <b>${days ? T.fmtHours(weeklyMinutes(days)) : '미제출'}</b>`);
-    const short = days ? T.WEEKDAYS.filter((w) => T.dayStatus(days[w], min) === 'short') : [];
+    const short = days ? periodWeekdays(p).filter((w) => T.dayStatus(days[w], min) === 'short') : [];
     if (short.length) lines.push(`⚠️ 기준(${T.fmtHours(min)}) 미달 요일: ${short.map((w) => T.DAY_NAMES[w]).join(', ')}`);
     return lines.join('\n');
 }
@@ -109,7 +119,7 @@ async function pickPeriod(a: A, args: string) {
     const date = parseFlexibleDate(args);
     const dayMatch = args.replace(/\d{1,2}\s*[월일]/g, '').match(/(?:^|\s)([월화수목금토일])(?:요일)?(?=\s|$)/);
     const day = dayMatch ? T.DAY_NAMES.indexOf(dayMatch[1]) : 0;
-    const period = date ? await S.getPeriodByWeek(a.org.id, weekStartOf(date)) : await S.getLatestPeriod(a.org.id);
+    const period = date ? await S.getPeriodAt(a.org.id, date) : await S.getLatestPeriod(a.org.id);
     return { period, day, date };
 }
 
@@ -202,7 +212,7 @@ async function menu(ctx: Ctx, a: A) {
     await show(
         ctx,
         `🪖 <b>${NAME}</b> · ${e(a.org.name)}\n👤 ${e(a.membership?.display_name || ctx.from.first_name)} (${role})\n` +
-            `🗓 취합 주차: ${p ? `${weekLabel(p.week_start)} (${p.status === 'open' ? '제출 받는 중' : '마감'})` : '아직 없음'}` +
+            `🗓 취합 주차: ${p ? `${weekLabel(p)} (${p.status === 'open' ? '제출 받는 중' : '마감'})` : '아직 없음'}` +
             note,
         buttons
     );
@@ -269,7 +279,8 @@ async function decideJoin(ctx: Ctx, a: Access, arg: string, approve: boolean) {
 
 /* ====================== 활동 가능 시간 제출 ====================== */
 
-const WEEK_EXAMPLE = '월/12-14,18-20\n화/15-18,19-21\n수/불가\n목/11-19\n금/11-20\n토/10-20';
+const EXAMPLE: Record<number, string> = { 1: '12-14,18-20', 2: '15-18,19-21', 3: '불가', 4: '11-19', 5: '11-20', 6: '10-20', 7: '13-18' };
+const weekExample = (p: S.Period) => periodWeekdays(p).map((w) => `${T.DAY_NAMES[w]}/${EXAMPLE[w]}`).join('\n');
 
 // '/활동시간' 만 보내면 양식 안내
 async function startAvail(ctx: Ctx, a: A) {
@@ -277,23 +288,20 @@ async function startAvail(ctx: Ctx, a: A) {
     if (!p) return void (await ctx.reply('⏳ 지금은 활동 시간을 받는 주차가 없습니다 (마감되었거나 시작 전). 관리자에게 문의해주세요.'));
     await show(
         ctx,
-        `📝 <b>${weekLabel(p.week_start)} 활동 시간</b>\n아래처럼 <b>/활동시간</b> 밑에 한 줄에 한 요일씩 적어 보내주세요 (시간 여러 개는 쉼표, 못 하는 날은 불가):\n\n<code>/활동시간\n${WEEK_EXAMPLE}</code>\n\n처음 제출이면 안 적은 요일은 활동 불가, 이미 제출했다면 적은 요일만 바뀝니다.`
+        `📝 <b>${weekLabel(p)} 활동 시간</b>\n아래처럼 <b>/활동시간</b> 밑에 한 줄에 한 요일씩 적어 보내주세요 (시간 여러 개는 쉼표, 못 하는 날은 불가):\n\n<code>/활동시간\n${weekExample(p)}</code>\n\n처음 제출이면 안 적은 요일은 활동 불가, 이미 제출했다면 적은 요일만 바뀝니다.`
     );
 }
 
 async function myStatus(ctx: Ctx, a: A) {
     const p = (await S.getEditablePeriod(a.org.id, a.userId)) ?? (await S.getLatestPeriod(a.org.id));
-    const wsNow = weekStartOf(today());
-    const [{ subs, min }, results] = await Promise.all([
-        loadWeek(a.org.id, p),
-        S.listResults(a.org.id, { userId: a.userId, from: wsNow, to: dayjs(wsNow).add(6, 'day').format('YYYY-MM-DD') }),
-    ]);
+    const r = await resultRange(a.org.id, today());
+    const [{ subs, min }, results] = await Promise.all([loadWeek(a.org.id, p), S.listResults(a.org.id, { userId: a.userId, from: r.from, to: r.to })]);
     const mine = p ? subs.get(a.userId) : undefined;
     let html = `📊 <b>내 활동 현황</b>\n`;
     html += p
-        ? `\n<b>[활동 가능 시간] ${weekLabel(p.week_start)}</b> (${p.status === 'open' ? '제출 받는 중' : '마감'})\n${renderPersonWeek(p.week_start, mine?.days, min)}\n`
+        ? `\n<b>[활동 가능 시간] ${weekLabel(p)}</b> (${p.status === 'open' ? '제출 받는 중' : '마감'})\n${renderPersonWeek(p, mine?.days, min)}\n`
         : '\n아직 취합 주차가 없습니다.\n';
-    html += `\n<b>[당일 결과]</b> (활동 가능 시간과 별도 집계)\n• 오늘: ${results.filter((r) => r.activity_date === today()).length}건\n• 이번 주: ${results.length}건`;
+    html += `\n<b>[당일 결과]</b> (활동 가능 시간과 별도 집계)\n• 오늘: ${results.filter((r) => r.activity_date === today()).length}건\n• ${r.name}: ${results.length}건`;
     await show(ctx, html, [[btn('📝 활동 시간 제출/수정', 'sd:a:제출'), btn('📄 내 결과', 'sd:a:내결과')]]);
 }
 
@@ -494,18 +502,21 @@ async function handleWeekText(ctx: Ctx, text: string) {
     if (inPrivate(ctx)) return void (await ctx.reply(MSG_GO_GROUP));
     const a = await access(ctx);
     if (!a.org || !hasPerm(a, 'member')) return void (await ctx.reply('🪖 활동 시간을 제출하려면 먼저 특전대 대원 등록이 필요합니다. /특전대 를 눌러주세요.'));
-    const parsed = T.parseWeekText(text);
-    if (!parsed || parsed.errors.length) return void (await ctx.reply(`⚠️ ${parsed?.errors.join('\n') || '요일/시간 형식으로 적어주세요.'}\n\n예:\n/활동시간\n${WEEK_EXAMPLE}`));
     const p = await S.getEditablePeriod(a.org.id, a.userId);
     if (!p) return void (await ctx.reply('⏳ 지금은 활동 시간을 받는 주차가 없습니다 (마감되었거나 시작 전). 관리자에게 문의해주세요.'));
+    const parsed = T.parseWeekText(text);
+    const allowed = periodWeekdays(p);
+    const outside = parsed ? Object.keys(parsed.days).map(Number).filter((w) => !allowed.includes(w)) : [];
+    if (outside.length) parsed!.errors.push(`${weekLabel(p)} 기간에 없는 요일입니다: ${outside.map((w) => T.DAY_NAMES[w]).join(', ')} (이번 기간: ${allowed.map((w) => T.DAY_NAMES[w]).join(', ')})`);
+    if (!parsed || parsed.errors.length) return void (await ctx.reply(`⚠️ ${parsed?.errors.join('\n') || '요일/시간 형식으로 적어주세요.'}\n\n예:\n/활동시간\n${weekExample(p)}`));
     const [existing, settings] = await Promise.all([S.getSubmissions(p.id).then((m) => m.get(a.userId)), getSettings(a.org.id, MK)]);
-    const days: S.WeekDays = Object.fromEntries(T.WEEKDAYS.map((w) => [w, parsed.days[w] ?? existing?.days[w] ?? { unavailable: true, slots: [] }]));
+    const days: S.WeekDays = Object.fromEntries(allowed.map((w) => [w, parsed.days[w] ?? existing?.days[w] ?? { unavailable: true, slots: [] }]));
     await S.saveSubmission(p.id, a.userId, days);
     await touchBoard(ctx, a.org.id);
     await audit(a.org.id, a.userId, existing ? 'avail.update' : 'avail.submit', p.id, days);
-    const untouched = T.WEEKDAYS.filter((w) => !parsed.days[w]);
+    const untouched = allowed.filter((w) => !parsed.days[w]);
     const note = untouched.length ? `\n\nℹ️ 안 적은 요일(${untouched.map((w) => T.DAY_NAMES[w]).join(', ')}): ${existing ? '기존 제출 그대로' : '활동 불가로 저장'}` : '';
-    await show(ctx, `✅ <b>활동 가능 시간 ${existing ? '수정' : '제출'} 완료</b> (${weekLabel(p.week_start)})\n\n${renderPersonWeek(p.week_start, days, Number(settings.min_minutes) || T.DEFAULT_MIN_MINUTES)}${note}`);
+    await show(ctx, `✅ <b>활동 가능 시간 ${existing ? '수정' : '제출'} 완료</b> (${weekLabel(p)})\n\n${renderPersonWeek(p, days, Number(settings.min_minutes) || T.DEFAULT_MIN_MINUTES)}${note}`);
 }
 
 // 단체방에 '발/…' 또는 '찾/…' 양식. 줄마다 바로 저장, 확인할 게 있을 때만 답장
@@ -622,11 +633,11 @@ async function sendTimetable(ctx: Ctx, a: A, period: S.Period, day: number) {
     const submitted = members.filter((m) => subs.has(m.user_id)).length;
     const snapshot: Record<string, unknown> = { week_start: period.week_start, generated_at: now, min, days: {} };
     let html =
-        `🗓 <b>[${NAME} 활동 시간표]</b> ${weekLabel(period.week_start)} 주차 (${period.status === 'open' ? '제출 받는 중' : '마감'})\n` +
+        `🗓 <b>[${NAME} 활동 시간표]</b> ${weekLabel(period)} 주차 (${period.status === 'open' ? '제출 받는 중' : '마감'})\n` +
         `생성 시각: ${now} · 하루 기준 ${T.fmtHours(min)}\n대원 ${members.length}명 · 제출 ${submitted}명 · 미제출 ${members.length - submitted}명\n`;
-    for (const w of day ? [day] : T.WEEKDAYS) {
+    for (const w of day ? [day] : periodWeekdays(period)) {
         const { people, segments } = weekTable(members, subs, min, w);
-        html += `\n━━━━━━━━━━━━━━\n<b>[${T.DAY_NAMES[w]} ${dateOf(period.week_start, w).format('M/D')}]</b>\n`;
+        html += `\n━━━━━━━━━━━━━━\n<b>[${T.DAY_NAMES[w]} ${dateOf(period, w).format('M/D')}]</b>\n`;
         html += segments.length ? segments.map((sg) => `${T.fmtSlot([sg.start, sg.end])} (${sg.names.length}명) ${sg.names.map(e).join(', ')}`).join('\n') : '제출된 시간이 없습니다.';
         const listed = people.filter((p) => p.status !== 'missing');
         if (listed.length)
@@ -640,7 +651,7 @@ async function sendTimetable(ctx: Ctx, a: A, period: S.Period, day: number) {
     }
     await S.saveSnapshot(period.id, a.userId, snapshot);
     await show(ctx, html, [
-        T.WEEKDAYS.map((w) => btn(T.DAY_NAMES[w], `sd:tt:${period.id}-${w}`)),
+        periodWeekdays(period).map((w) => btn(T.DAY_NAMES[w], `sd:tt:${period.id}-${w}`)),
         [btn('전체', `sd:tt:${period.id}-0`)],
         [btn('📥 CSV 내보내기', `sd:tc:${period.id}`)],
     ]);
@@ -649,16 +660,16 @@ async function sendTimetable(ctx: Ctx, a: A, period: S.Period, day: number) {
 async function timetableCsv(ctx: Ctx, a: A, period: S.Period) {
     const { members, subs, min } = await loadWeek(a.org.id, period);
     const segRows: (string | number)[][] = [];
-    for (const w of T.WEEKDAYS) {
+    for (const w of periodWeekdays(period)) {
         for (const sg of weekTable(members, subs, min, w).segments) {
-            segRows.push([T.DAY_NAMES[w], dateOf(period.week_start, w).format('YYYY-MM-DD'), T.fmtClock(sg.start), T.fmtClock(sg.end), sg.names.length, sg.names.join(', ')]);
+            segRows.push([T.DAY_NAMES[w], dateOf(period, w).format('YYYY-MM-DD'), T.fmtClock(sg.start), T.fmtClock(sg.end), sg.names.length, sg.names.join(', ')]);
         }
     }
     const personRows = members.map((m) => {
         const days = subs.get(m.user_id)?.days;
         return [
             m.display_name,
-            ...T.WEEKDAYS.flatMap((w) => {
+            ...periodWeekdays(period).flatMap((w) => {
                 const st = T.dayStatus(days?.[w], min);
                 return [st === 'ok' || st === 'short' ? T.totalMinutes(days![w].slots) / 60 : '', T.STATUS_LABEL[st].replace(/^\S+\s/, '')];
             }),
@@ -666,11 +677,11 @@ async function timetableCsv(ctx: Ctx, a: A, period: S.Period) {
         ];
     });
     const tag = `${period.week_start}_${nowKst().format('MMDD-HHmm')}`;
-    await sendCsv(ctx, `timetable_${tag}.csv`, R.toCsv(['요일', '날짜', '시작', '종료', '인원', '활동 가능 대원'], segRows), `🗓 ${weekLabel(period.week_start)} 시간표`);
+    await sendCsv(ctx, `timetable_${tag}.csv`, R.toCsv(['요일', '날짜', '시작', '종료', '인원', '활동 가능 대원'], segRows), `🗓 ${weekLabel(period)} 시간표`);
     await sendCsv(
         ctx,
         `personal_hours_${tag}.csv`,
-        R.toCsv(['대원', ...T.WEEKDAYS.flatMap((w) => [`${T.DAY_NAMES[w]}(시간)`, `${T.DAY_NAMES[w]} 상태`]), '주간 합계(시간)'], personRows),
+        R.toCsv(['대원', ...periodWeekdays(period).flatMap((w) => [`${T.DAY_NAMES[w]}(시간)`, `${T.DAY_NAMES[w]} 상태`]), '주간 합계(시간)'], personRows),
         '👥 개인별 활동 가능 시간'
     );
 }
@@ -707,10 +718,9 @@ function perPerson(rows: S.ResultRow[], members: Membership[]) {
 
 // 일일 현황 (결과 대상자 이름·연락처 없음, 단체방 현황판에도 사용)
 async function todayHtml(orgId: number, date: string) {
-    const ws = weekStartOf(date);
+    const { period, from, name } = await resultRange(orgId, date);
     const w = weekdayOf(date);
-    const period = await S.getPeriodByWeek(orgId, ws);
-    const [{ members, subs, min }, week] = await Promise.all([loadWeek(orgId, period), S.listResults(orgId, { from: ws, to: date })]);
+    const [{ members, subs, min }, week] = await Promise.all([loadWeek(orgId, period), S.listResults(orgId, { from, to: date })]);
     const results = week.filter((r) => r.activity_date === date);
     const people = weekTable(members, subs, min, w).people;
     const count = (st: T.DayStatus) => people.filter((p) => p.status === st).length;
@@ -719,12 +729,9 @@ async function todayHtml(orgId: number, date: string) {
     html += `\n<b>1. 당일 결과</b> — 총 ${results.length}건 (${kindCount(results)})\n${perPerson(results, members)}`;
     const none = members.filter((m) => !results.some((r) => r.user_id === m.user_id));
     if (results.length && none.length) html += `\n• 0건: ${none.map((m) => e(m.display_name)).join(', ')}`;
-    html += `\n\n<b>2. 이번 주 누적</b> (${dayjs(ws).format('M/D')}~${dayjs(date).format('M/D')}) — 총 ${week.length}건 (${kindCount(week)})\n${perPerson(week, members)}`;
-    html += `\n\n<b>3. 요일별</b>\n${T.WEEKDAYS.filter((d) => d <= w)
-        .map((d) => {
-            const ymd = dateOf(ws, d).format('YYYY-MM-DD');
-            return `• ${T.DAY_NAMES[d]} ${dateOf(ws, d).format('M/D')}: ${kindCount(week.filter((r) => r.activity_date === ymd))}`;
-        })
+    html += `\n\n<b>2. ${name} 누적</b> (${rangeLabel(from, date)}) — 총 ${week.length}건 (${kindCount(week)})\n${perPerson(week, members)}`;
+    html += `\n\n<b>3. 요일별</b>\n${Array.from({ length: dayjs(date).diff(from, 'day') + 1 }, (_, i) => dayjs(from).add(i, 'day'))
+        .map((d) => `• ${'일월화수목금토'[d.day()]} ${d.format('M/D')}: ${kindCount(week.filter((r) => r.activity_date === d.format('YYYY-MM-DD')))}`)
         .join('\n')}`;
     html += `\n\n<b>4. 활동 가능 시간</b>\n• 등록 대원: ${members.length}명\n`;
     if (!period) html += '• 이 주차는 취합이 시작되지 않았습니다.\n';
@@ -837,7 +844,7 @@ const pctOf = (n: number, d: number) => (d ? Math.round((n / d) * 100) : 0);
 
 // 발굴 답장률: 대원별·도구별·인도지역별·인도팀별 '발굴 n → 답장온 m (x%)' (이름·연락처 없음). 기본 이번 주
 async function replyRate(ctx: Ctx, a: A, args: string) {
-    const { from, to } = argRange(args, { from: weekStartOf(today()), to: today() });
+    const { from, to } = argRange(args, { from: (await resultRange(a.org.id, today())).from, to: today() });
     const [rows, members] = await Promise.all([S.listResults(a.org.id, { from, to, kind: 'dig' }), listMembers(a.org.id, MK)]);
     const head = `💬 <b>[발굴 답장률]</b> ${dayjs(from).format('M/D')}~${dayjs(to).format('M/D')}`;
     if (!rows.length) return show(ctx, `${head}\n\n이 기간에 발굴건이 없습니다.`);
@@ -894,24 +901,28 @@ async function meetings(ctx: Ctx, a: A, args: string) {
 }
 
 async function personal(ctx: Ctx, a: A, args: string) {
-    const period = (await S.getPeriodByWeek(a.org.id, weekStartOf(today()))) ?? (await S.getLatestPeriod(a.org.id));
+    const r = await resultRange(a.org.id, today());
+    const period = r.period ?? (await S.getLatestPeriod(a.org.id));
     const { members, subs, min } = await loadWeek(a.org.id, period);
-    const ws = weekStartOf(today());
-    const results = await S.listResults(a.org.id, { from: ws, to: dayjs(ws).add(6, 'day').format('YYYY-MM-DD') });
+    const results = await S.listResults(a.org.id, { from: r.from, to: r.to });
     if (args) {
         const m = members.find((x) => x.telegram_id === args || x.display_name === args);
         if (!m) return void (await ctx.reply('⚠️ 해당 대원을 찾을 수 없습니다. 이름 또는 텔레그램 ID로 입력해주세요.'));
         return personDetail(ctx, a, m.id);
     }
     const w = weekdayOf(today());
-    let html = `👥 <b>[개인별 활동 및 결과]</b>${period ? ` 활동 시간: ${weekLabel(period.week_start)} 주차` : ''}\n결과 집계: 이번 주 (${weekLabel(ws)}) · 결과 건수는 실제 활동 시간이 아닙니다\n\n`;
+    let html = `👥 <b>[개인별 활동 및 결과]</b>${period ? ` 활동 시간: ${weekLabel(period)} 주차` : ''}\n결과 집계: ${r.name} (${rangeLabel(r.from, r.to)}) · 결과 건수는 실제 활동 시간이 아닙니다\n\n`;
     html += members
         .map((m) => {
             const days = subs.get(m.user_id)?.days;
             const mine = results.filter((r) => r.user_id === m.user_id);
             const todayStatus = T.dayStatus(days?.[w], min);
-            const todayTxt = todayStatus === 'ok' || todayStatus === 'short' ? `${T.fmtHours(T.totalMinutes(days![w].slots))} ${T.STATUS_LABEL[todayStatus]}` : T.STATUS_LABEL[todayStatus];
-            const short = days ? T.WEEKDAYS.filter((x) => T.dayStatus(days[x], min) === 'short').map((x) => T.DAY_NAMES[x]) : [];
+            const todayTxt = !r.period
+                ? '-' // 오늘은 특전대 기간이 아님
+                : todayStatus === 'ok' || todayStatus === 'short'
+                  ? `${T.fmtHours(T.totalMinutes(days![w].slots))} ${T.STATUS_LABEL[todayStatus]}`
+                  : T.STATUS_LABEL[todayStatus];
+            const short = days ? periodWeekdays(period!).filter((x) => T.dayStatus(days[x], min) === 'short').map((x) => T.DAY_NAMES[x]) : [];
             return (
                 `• <b>${e(m.display_name)}</b>\n   오늘 ${todayTxt} · 결과 ${mine.filter((r) => r.activity_date === today()).length}건\n` +
                 `   주간 ${days ? T.fmtHours(weeklyMinutes(days)) : '⏳ 미제출'} · 결과 ${mine.length}건${short.length ? ` · 미달: ${short.join(',')}` : ''}`
@@ -931,17 +942,17 @@ async function personal(ctx: Ctx, a: A, args: string) {
 async function personDetail(ctx: Ctx, a: A, membershipId: number) {
     const m = await getMember(a.org.id, MK, { id: membershipId });
     if (!m) return show(ctx, '⚠️ 대원을 찾을 수 없습니다.');
-    const period = (await S.getPeriodByWeek(a.org.id, weekStartOf(today()))) ?? (await S.getLatestPeriod(a.org.id));
+    const r = await resultRange(a.org.id, today());
+    const period = r.period ?? (await S.getLatestPeriod(a.org.id));
     const { subs, min } = await loadWeek(a.org.id, period);
-    const ws = weekStartOf(today());
-    const results = await S.listResults(a.org.id, { userId: m.user_id, from: ws, to: dayjs(ws).add(6, 'day').format('YYYY-MM-DD') });
+    const results = await S.listResults(a.org.id, { userId: m.user_id, from: r.from, to: r.to });
     const recent = (await S.listResults(a.org.id, { userId: m.user_id })).slice(0, 5);
     const pii = piiHere(ctx, a);
     await replyLong(
         ctx,
         `👤 <b>${e(m.display_name)}</b> (ID <code>${m.telegram_id}</code> · ${m.status})\n` +
-            (period ? `\n<b>[활동 가능 시간] ${weekLabel(period.week_start)}</b>\n${renderPersonWeek(period.week_start, subs.get(m.user_id)?.days, min)}\n` : '\n취합 주차 없음\n') +
-            `\n<b>[결과]</b> 오늘 ${results.filter((r) => r.activity_date === today()).length}건 · 이번 주 ${results.length}건\n` +
+            (period ? `\n<b>[활동 가능 시간] ${weekLabel(period)}</b>\n${renderPersonWeek(period, subs.get(m.user_id)?.days, min)}\n` : '\n취합 주차 없음\n') +
+            `\n<b>[결과]</b> 오늘 ${results.filter((r) => r.activity_date === today()).length}건 · ${r.name} ${results.length}건\n` +
             (recent.length ? `<b>최근 결과</b>\n${recent.map((r) => resultLine(r, pii)).join('\n')}` : '최근 결과 없음')
     );
 }
@@ -953,7 +964,7 @@ async function unsubmitted(ctx: Ctx, a: A, args: string) {
     const missing = members.filter((m) => !subs.has(m.user_id));
     await replyLong(
         ctx,
-        `⏳ <b>[미제출자] ${weekLabel(period.week_start)}</b> (${period.status === 'open' ? '제출 받는 중' : '마감'})\n` +
+        `⏳ <b>[미제출자] ${weekLabel(period)}</b> (${period.status === 'open' ? '제출 받는 중' : '마감'})\n` +
             `제출 ${members.length - missing.length}/${members.length}명\n\n` +
             (missing.length ? missing.map((m) => `• ${e(m.display_name)}`).join('\n') : '🎉 모두 제출했습니다.')
     );
@@ -968,14 +979,14 @@ async function shortage(ctx: Ctx, a: A, args: string) {
     for (const m of members) {
         const days = subs.get(m.user_id)?.days;
         if (!days) continue;
-        const s = T.WEEKDAYS.filter((w) => T.dayStatus(days[w], min) === 'short');
-        const u = T.WEEKDAYS.filter((w) => days[w].unavailable);
+        const s = periodWeekdays(period).filter((w) => T.dayStatus(days[w], min) === 'short');
+        const u = periodWeekdays(period).filter((w) => days[w].unavailable);
         if (s.length) short.push(`• ${e(m.display_name)}: ${s.map((w) => `${T.DAY_NAMES[w]} ${T.fmtHours(T.totalMinutes(days[w].slots))}(-${T.fmtHours(min - T.totalMinutes(days[w].slots))})`).join(', ')}`);
         if (u.length) unavailable.push(`• ${e(m.display_name)}: ${u.map((w) => T.DAY_NAMES[w]).join(', ')}`);
     }
     await replyLong(
         ctx,
-        `⚠️ <b>[부족 시간] ${weekLabel(period.week_start)}</b> — 하루 기준 ${T.fmtHours(min)}\n\n` +
+        `⚠️ <b>[부족 시간] ${weekLabel(period)}</b> — 하루 기준 ${T.fmtHours(min)}\n\n` +
             `<b>미충족</b>\n${short.join('\n') || '없음'}\n\n<b>활동 불가로 제출</b>\n${unavailable.join('\n') || '없음'}\n\n(미제출자는 /특전대 미제출)`
     );
 }
@@ -1112,7 +1123,7 @@ async function closePeriod(ctx: Ctx, a: A) {
     if (!p) return void (await ctx.reply('ℹ️ 제출을 받는 주차가 없습니다.'));
     await S.setPeriodStatus(a.org.id, p.id, 'closed');
     await audit(a.org.id, a.userId, 'period.close', p.id);
-    await ctx.reply(`🔒 ${weekLabel(p.week_start)} 주차 제출을 마감했습니다. (재개방: /특전대 재개방)`);
+    await ctx.reply(`🔒 ${weekLabel(p)} 주차 제출을 마감했습니다. (재개방: /특전대 재개방)`);
 }
 
 async function reopenPeriod(ctx: Ctx, a: A, args: string) {
@@ -1120,17 +1131,19 @@ async function reopenPeriod(ctx: Ctx, a: A, args: string) {
     if (!period) return void (await ctx.reply('⚠️ 주차가 없습니다.'));
     await S.setPeriodStatus(a.org.id, period.id, 'open');
     await audit(a.org.id, a.userId, 'period.reopen', period.id);
-    await ctx.reply(`🔓 ${weekLabel(period.week_start)} 주차 제출을 다시 열었습니다.`);
+    await ctx.reply(`🔓 ${weekLabel(period)} 주차 제출을 다시 열었습니다.`);
 }
 
 async function startPeriod(ctx: Ctx, a: A, args: string) {
-    // 날짜가 없으면 다음 주 월요일
-    const date = parseFlexibleDate(args) || dayjs(weekStartOf(today())).add(7, 'day').format('YYYY-MM-DD');
-    const ws = weekStartOf(date);
-    const p = await S.createPeriod(a.org.id, ws);
-    if (!p) return void (await ctx.reply(`ℹ️ ${weekLabel(ws)} 주차는 이미 있습니다. (마감 상태면 /특전대 재개방 ${dayjs(ws).format('M.D')})`));
+    // '[시작일] [일수]' — 시작일은 아무 요일 (없으면 다음 주 월요일), 일수 1~7 (없으면 7). 예: 11.20 3 → 11/20~11/22
+    const n = args.match(/(?:^|\s)([1-7])(?:일간)?\s*$/);
+    const days = n ? Number(n[1]) : 7;
+    const start = parseFlexibleDate(n ? args.slice(0, n.index) : args) || dayjs(weekStartOf(today())).add(7, 'day').format('YYYY-MM-DD');
+    const p = await S.createPeriod(a.org.id, start, days);
+    const label = rangeLabel(start, dayjs(start).add(days - 1, 'day').format('YYYY-MM-DD'));
+    if (!p) return void (await ctx.reply(`ℹ️ ${label} 기간이 이미 있는 주차와 겹칩니다. (마감 상태면 /특전대 재개방 ${dayjs(start).format('M.D')})`));
     await audit(a.org.id, a.userId, 'period.start', p.id);
-    await ctx.reply(`🆕 ${weekLabel(ws)} 주차 활동 시간 취합을 시작했습니다. 이전 주차 데이터는 그대로 보존됩니다.\n대원들은 /특전대 → 활동 시간 제출`);
+    await ctx.reply(`🆕 ${weekLabel(p)} 주차 활동 시간 취합을 시작했습니다. 이전 주차 데이터는 그대로 보존됩니다.\n대원들은 /특전대 → 활동 시간 제출`);
 }
 
 async function allowEdit(ctx: Ctx, a: A, args: string) {
@@ -1139,7 +1152,7 @@ async function allowEdit(ctx: Ctx, a: A, args: string) {
     if (!m || !p) return void (await ctx.reply('사용법: /특전대 수정허용 <텔레그램ID>  (최신 주차가 마감된 뒤에도 그 대원만 수정 가능)'));
     await S.addExtraEditor(a.org.id, p.id, m.user_id);
     await audit(a.org.id, a.userId, 'period.allow_edit', p.id, { user_id: m.user_id });
-    await ctx.reply(`✏️ ${m.display_name} 님은 ${weekLabel(p.week_start)} 주차가 마감되어도 수정할 수 있습니다.`);
+    await ctx.reply(`✏️ ${m.display_name} 님은 ${weekLabel(p)} 주차가 마감되어도 수정할 수 있습니다.`);
 }
 
 const roleOf = (m: Membership) => (m.status !== 'active' ? (m.status === 'pending' ? '⏳ 대기' : '🚫 제외') : m.perms.includes('manager') ? '🛠 관리자' : '🪖 대원');
@@ -1285,7 +1298,7 @@ const HELP_MANAGER =
     '• <code>/특전대 시간표 [날짜] [요일]</code> · <code>오늘현황 [날짜]</code> · <code>개인현황 [이름]</code>\n' +
     '• <code>/특전대 결과검색 기간:10.1~10.24 인도지역:서울</code>\n' +
     '• <code>/특전대 답장률 [10.1~10.24]</code> — 대원·도구·지역·팀별 발굴 답장률 (기본 이번 주) · <code>만남 [기간]</code> — 2차 만남 일정 (기본 오늘부터 7일)\n' +
-    '• <code>/특전대 미제출</code> · <code>부족시간</code> · <code>마감</code> · <code>재개방 [날짜]</code> · <code>주차시작 [날짜]</code> · <code>수정허용 ID</code>\n' +
+    '• <code>/특전대 미제출</code> · <code>부족시간</code> · <code>마감</code> · <code>재개방 [날짜]</code> · <code>주차시작 [시작일] [일수]</code> · <code>수정허용 ID</code>\n' +
     '• 단체방에서: <code>/특전대 방등록</code> (그 방 사람은 가입 요청 없이 자동 대원) · <code>방해제</code>\n' +
     '• 결과 주제에서: <code>/특전대 결과주제</code> (그 주제의 발/찾만 받음) · <code>결과주제 해제</code>\n' +
     '• 현황판 둘 주제(토픽)에서: <code>/특전대 현황판</code> — 결과·활동 시간이 올라올 때마다 그 메시지를 자동 갱신 (끄기: <code>현황판 해제</code>)\n' +

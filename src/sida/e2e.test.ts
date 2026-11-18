@@ -124,7 +124,7 @@ test('[1-4][7] 활동 시간 제출 — 한 메시지 입력, 겹침, 활동 불
     assert.match(out, /안 적은 요일\(토, 일\): 활동 불가로 저장/);
     assert.ok(!calls.some((c) => c.payload?.reply_markup), '버튼 없음');
 
-    const p = (await S.getPeriodByWeek(1, '2026-10-26'))!;
+    const p = (await S.getPeriodAt(1, '2026-10-26'))!;
     const mine = (await S.getSubmissions(p.id)).get(await uid(101))!;
     assert.equal(mine.days[3].unavailable, true);
     assert.deepEqual(mine.days[1].slots, [
@@ -138,7 +138,7 @@ test('[1-4][7] 활동 시간 제출 — 한 메시지 입력, 겹침, 활동 불
 });
 
 test('[6][17] 12명 시간표 · 미제출 · 부족시간 · CSV, 시간표와 개인 합계 일치', async () => {
-    const p = (await S.getPeriodByWeek(1, '2026-10-26'))!;
+    const p = (await S.getPeriodAt(1, '2026-10-26'))!;
     for (let i = 1; i <= 11; i++) {
         await send(ADMIN, `/특전대 등록 ${200 + i} 대원${String(i).padStart(2, '0')}`);
         if (i > 9) continue; // 대원10, 대원11 은 미제출
@@ -175,7 +175,7 @@ test('[6][17] 12명 시간표 · 미제출 · 부족시간 · CSV, 시간표와 
 });
 
 test('한 메시지로 일주일 활동 시간 입력 — 적은 요일만 반영, 처음이면 나머지는 활동 불가', async () => {
-    const p = (await S.getPeriodByWeek(1, '2026-10-26'))!;
+    const p = (await S.getPeriodAt(1, '2026-10-26'))!;
     assert.match(await send(211, '/활동시간\n월/09:00-14:00,18:00 화/12:00-14:00'), /월요일: 형식을 알 수 없습니다: "18:00"/); // 끝 시각은 추측하지 않음
     assert.equal((await S.getSubmissions(p.id)).has(await uid(211)), false); // 틀리면 저장 안 됨
     const out = await send(211, '/활동시간\n월/09:00-14:00,18:00-21:00 화/12:00-14:00 수/불가');
@@ -483,13 +483,13 @@ test('[14] 조직별 데이터 분리', async () => {
 });
 
 test('[18] 새 주차가 지난 주차를 덮어쓰지 않음 · 마감/재개방/수정허용', async () => {
-    const p1 = (await S.getPeriodByWeek(1, '2026-10-26'))!;
+    const p1 = (await S.getPeriodAt(1, '2026-10-26'))!;
     const before1 = JSON.stringify([...(await S.getSubmissions(p1.id)).entries()].map(([k, v]) => [k, v.days]));
     await send(ADMIN, '/특전대 주차시작 2026.11.2');
     const out = await send(101, '/활동시간\n월/08:00~14:00');
     assert.match(out, /제출 완료<\/b> \(11\/2~11\/8\)/); // 새 주차는 빈 상태로 시작 → '수정'이 아니라 '제출'
     assert.match(out, /화, 수, 목, 금, 토, 일\): 활동 불가로 저장/);
-    const p2 = (await S.getPeriodByWeek(1, '2026-11-02'))!;
+    const p2 = (await S.getPeriodAt(1, '2026-11-02'))!;
     assert.equal(JSON.stringify([...(await S.getSubmissions(p1.id)).entries()].map(([k, v]) => [k, v.days])), before1);
     assert.deepEqual((await S.getSubmissions(p2.id)).get(await uid(101))!.days[1].slots, [[480, 840]]);
 
@@ -501,6 +501,23 @@ test('[18] 새 주차가 지난 주차를 덮어쓰지 않음 · 마감/재개�
     assert.match(await send(205, '/특전대 제출'), /받는 주차가 없습니다/);
     assert.match(await send(ADMIN, '/특전대 재개방 2026.11.2'), /다시 열었습니다/);
     assert.match(await send(205, '/특전대 제출'), /11\/2/);
+});
+
+test('3일 특전대 — 아무 요일 시작 · 일수 지정 · 겹치면 거절 · 기간 밖 요일 거절', async () => {
+    assert.match(await send(ADMIN, '/특전대 주차시작 2026.11.12 3'), /11\/12~11\/14 주차 활동 시간 취합을 시작/); // 목~토
+    assert.match(await send(ADMIN, '/특전대 주차시작 2026.11.14'), /겹칩니다/);
+    assert.match(await send(ADMIN, '/특전대 주차시작 2026.11.6 7'), /겹칩니다/); // 11/2~11/8 주차와 겹침
+    assert.match(await send(101, '/특전대 제출'), /목\/11-19\n금\/11-20\n토\/10-20<\/code>/);
+    assert.match(await send(101, '/활동시간\n목/10-16\n월/10-12'), /없는 요일입니다: 월 \(이번 기간: 목, 금, 토\)/);
+    const out = await send(101, '/활동시간\n목/10-16');
+    assert.match(out, /제출 완료<\/b> \(11\/12~11\/14\)/);
+    assert.match(out, /목 11\/12: 10:00~16:00[\s\S]*금 11\/13: 🚫 활동 불가\n• 토 11\/14: 🚫 활동 불가\n주간/);
+    assert.match(out, /\(금, 토\): 활동 불가로 저장/);
+    assert.doesNotMatch(out, /• 월 /);
+    const p = (await S.getPeriodAt(1, '2026-11-13'))!;
+    assert.equal(p.week_start, '2026-11-12');
+    assert.equal(p.days, 3);
+    assert.equal(await S.getPeriodAt(1, '2026-11-15'), undefined);
 });
 
 test('[15] 봇 재시작 후에도 제출 데이터·진행 중 입력 유지', async () => {

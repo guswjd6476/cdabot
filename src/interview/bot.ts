@@ -142,10 +142,8 @@ const KIND_CODE: Record<InterviewKind, string> = { 향수행사: 'h', 당터뷰:
 const kindOfCode = (c: string): InterviewKind | undefined => (c === 'h' ? '향수행사' : c === 'd' ? '당터뷰' : undefined);
 const SIDA_MK = SS.MODULE_KEY; // 특전대 대원 모듈 ('special')
 
-// 특전대 기간: 관리자가 만든 특전대 주차(월~일) 안의 날짜일 때만 등록 기능을 켬
-const inSidaWeek = async (orgId: number, date: string) =>
-    !!(await SS.getPeriodByWeek(orgId, weekStart(date)));
-const weekStart = (date: string) => dayjs(date).subtract((dayjs(date).day() + 6) % 7, 'day').format('YYYY-MM-DD');
+// 특전대 기간: 관리자가 만든 특전대 기간(주차시작) 안의 날짜일 때만 등록 기능을 켬
+const inSidaWeek = async (orgId: number, date: string) => !!(await SS.getPeriodAt(orgId, date));
 
 // 인도자 이름 → 같은 이름의 특전대 대원 (한 명일 때만)
 async function sidaOwners(orgId: number) {
@@ -158,9 +156,9 @@ async function sidaOwners(orgId: number) {
 //   → 현황판·웹 반영. 서버가 매일 23:50(KST)에 호출. 이번 특전대 주차 안에 올라온 것만, 실적은 그 발굴건을 올린 대원, 같은 이름 찾기건이 이미 있으면(인터뷰 후속 O 등) 안 넣음
 export async function syncAdminFinds(telegram: Telegraf['telegram']) {
     const to = today();
-    const ws = weekStart(to);
     for (const org of await listOrgs()) {
-        if (!(await SS.getPeriodByWeek(org.id, ws))) continue;
+        const ws = (await SS.getPeriodAt(org.id, to))?.week_start;
+        if (!ws) continue;
         const added: string[] = [];
         for (const s of await S.adminFindsOfDigs(org.id, SIDA_MK, ws, to)) {
             if (await SS.findNameExists(org.id, s.name)) continue;
