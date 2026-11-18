@@ -518,6 +518,13 @@ test('3일 특전대 — 아무 요일 시작 · 일수 지정 · 겹치면 거�
     assert.equal(p.week_start, '2026-11-12');
     assert.equal(p.days, 3);
     assert.equal(await S.getPeriodAt(1, '2026-11-15'), undefined);
+
+    assert.match(await send(ADMIN, '/특전대 주차수정'), /사용법/);
+    assert.match(await send(ADMIN, '/특전대 주차수정 2026.11.7 3'), /겹쳐서 고치지 않았습니다/); // 11/2~11/8 주차와 겹침
+    assert.match(await send(ADMIN, '/특전대 주차수정 2026.11.13 3'), /11\/12~11\/14 → <b>11\/13~11\/15<\/b>[\s\S]*빠진 요일\(목\)/); // 자기와 겹치는 건 괜찮음
+    const q = (await S.getPeriodAt(1, '2026-11-15'))!;
+    assert.deepEqual([q.id, q.week_start, q.days], [p.id, '2026-11-13', 3]);
+    assert.match(await send(101, '/특전대 내현황'), /금 11\/13: 🚫 활동 불가\n• 토 11\/14: 🚫 활동 불가\n• 일 11\/15: /);
 });
 
 test('[15] 봇 재시작 후에도 제출 데이터·진행 중 입력 유지', async () => {

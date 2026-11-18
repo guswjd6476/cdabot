@@ -59,6 +59,18 @@ export async function createPeriod(orgId: number, start: string, days = 7): Prom
     return res.rows[0] ? getPeriodById(orgId, res.rows[0].id) : undefined;
 }
 
+// 시작일·일수 변경. 자기 말고 다른 기간과 겹치면 바꾸지 않음 (undefined)
+export async function updatePeriod(orgId: number, id: number, start: string, days: number): Promise<Period | undefined> {
+    const res = await query(
+        `UPDATE cdabot_periods SET week_start = $4::date, days = $5::int
+         WHERE org_id = $1 AND module_key = $2 AND id = $3
+           AND NOT EXISTS (SELECT 1 FROM cdabot_periods o WHERE o.org_id = $1 AND o.module_key = $2 AND o.id <> $3 AND o.week_start < $4::date + $5::int AND $4::date < o.week_start + o.days)
+         RETURNING id;`,
+        [orgId, MODULE_KEY, id, start, days]
+    );
+    return res.rows[0] ? getPeriodById(orgId, id) : undefined;
+}
+
 export async function setPeriodStatus(orgId: number, periodId: number, status: 'open' | 'closed') {
     await query(
         `UPDATE cdabot_periods SET status = $3, closed_at = CASE WHEN $3 = 'closed' THEN NOW() ELSE NULL END

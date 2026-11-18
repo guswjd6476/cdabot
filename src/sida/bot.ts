@@ -159,6 +159,7 @@ const ACTIONS: Record<string, Action> = {
     마감: { label: '🔒 제출 마감', need: 'manager', run: closePeriod },
     재개방: { label: '🔓 제출 재개방', need: 'manager', run: reopenPeriod },
     주차시작: { label: '🆕 새 주차 시작', need: 'manager', run: startPeriod },
+    주차수정: { need: 'manager', run: editPeriod },
     대원: { label: '🧑‍🤝‍🧑 인원·역할 관리', need: 'manager', run: memberList },
     승인: { label: '🙋 가입 승인', need: 'manager', run: pendingList },
     수정허용: { need: 'manager', run: allowEdit },
@@ -1134,16 +1135,42 @@ async function reopenPeriod(ctx: Ctx, a: A, args: string) {
     await ctx.reply(`🔓 ${weekLabel(period)} 주차 제출을 다시 열었습니다.`);
 }
 
-async function startPeriod(ctx: Ctx, a: A, args: string) {
-    // '[시작일] [일수]' — 시작일은 아무 요일 (없으면 다음 주 월요일), 일수 1~7 (없으면 7). 예: 11.20 3 → 11/20~11/22
+// '[시작일] [일수]' — 시작일은 아무 요일, 일수 1~7 (없으면 7). 예: 11.20 3 → 11/20~11/22
+function parsePeriodArgs(args: string) {
     const n = args.match(/(?:^|\s)([1-7])(?:일간)?\s*$/);
     const days = n ? Number(n[1]) : 7;
-    const start = parseFlexibleDate(n ? args.slice(0, n.index) : args) || dayjs(weekStartOf(today())).add(7, 'day').format('YYYY-MM-DD');
+    const start = parseFlexibleDate(n ? args.slice(0, n.index) : args);
+    return { start, days, label: start ? rangeLabel(start, dayjs(start).add(days - 1, 'day').format('YYYY-MM-DD')) : '' };
+}
+
+async function startPeriod(ctx: Ctx, a: A, args: string) {
+    const x = parsePeriodArgs(args);
+    const start = x.start || dayjs(weekStartOf(today())).add(7, 'day').format('YYYY-MM-DD'); // 날짜가 없으면 다음 주 월요일
+    const days = x.days;
     const p = await S.createPeriod(a.org.id, start, days);
     const label = rangeLabel(start, dayjs(start).add(days - 1, 'day').format('YYYY-MM-DD'));
     if (!p) return void (await ctx.reply(`ℹ️ ${label} 기간이 이미 있는 주차와 겹칩니다. (마감 상태면 /특전대 재개방 ${dayjs(start).format('M.D')})`));
     await audit(a.org.id, a.userId, 'period.start', p.id);
     await ctx.reply(`🆕 ${weekLabel(p)} 주차 활동 시간 취합을 시작했습니다. 이전 주차 데이터는 그대로 보존됩니다.\n대원들은 /특전대 → 활동 시간 제출`);
+}
+
+// 열린 주차(없으면 최신 주차)의 시작일·일수를 바꿈. 활동 시간은 요일로 저장돼 있어 새 기간에 남는 요일만 그대로 보임
+async function editPeriod(ctx: Ctx, a: A, args: string) {
+    const { start, days, label } = parsePeriodArgs(args);
+    if (!start) return void (await ctx.reply('사용법: /특전대 주차수정 <시작일> [일수]  (예: /특전대 주차수정 11.20 3 → 11/20~11/22)'));
+    const old = (await S.getEditablePeriod(a.org.id, -1)) ?? (await S.getLatestPeriod(a.org.id));
+    if (!old) return void (await ctx.reply('⚠️ 고칠 주차가 없습니다. /특전대 주차시작 으로 먼저 주차를 시작해주세요.'));
+    const p = await S.updatePeriod(a.org.id, old.id, start, days);
+    if (!p) return void (await ctx.reply(`ℹ️ ${label} 기간이 다른 주차와 겹쳐서 고치지 않았습니다.`));
+    await audit(a.org.id, a.userId, 'period.edit', p.id, { from: { start: old.week_start, days: old.days }, to: { start, days } });
+    await touchBoard(ctx, a.org.id);
+    const lost = periodWeekdays(old).filter((w) => !periodWeekdays(p).includes(w));
+    await ctx.reply(
+        `✏️ 주차를 ${weekLabel(old)} → <b>${weekLabel(p)}</b> 로 고쳤습니다.` +
+            (lost.length ? `
+ℹ️ 빠진 요일(${lost.map((w) => T.DAY_NAMES[w]).join(', ')})에 낸 활동 시간은 보이지 않습니다. 새로 들어온 요일은 대원들이 다시 제출해야 합니다.` : ''),
+        { parse_mode: 'HTML' }
+    );
 }
 
 async function allowEdit(ctx: Ctx, a: A, args: string) {
@@ -1298,7 +1325,7 @@ const HELP_MANAGER =
     '• <code>/특전대 시간표 [날짜] [요일]</code> · <code>오늘현황 [날짜]</code> · <code>개인현황 [이름]</code>\n' +
     '• <code>/특전대 결과검색 기간:10.1~10.24 인도지역:서울</code>\n' +
     '• <code>/특전대 답장률 [10.1~10.24]</code> — 대원·도구·지역·팀별 발굴 답장률 (기본 이번 주) · <code>만남 [기간]</code> — 2차 만남 일정 (기본 오늘부터 7일)\n' +
-    '• <code>/특전대 미제출</code> · <code>부족시간</code> · <code>마감</code> · <code>재개방 [날짜]</code> · <code>주차시작 [시작일] [일수]</code> · <code>수정허용 ID</code>\n' +
+    '• <code>/특전대 미제출</code> · <code>부족시간</code> · <code>마감</code> · <code>재개방 [날짜]</code> · <code>주차시작 [시작일] [일수]</code> · <code>주차수정 시작일 [일수]</code> · <code>수정허용 ID</code>\n' +
     '• 단체방에서: <code>/특전대 방등록</code> (그 방 사람은 가입 요청 없이 자동 대원) · <code>방해제</code>\n' +
     '• 결과 주제에서: <code>/특전대 결과주제</code> (그 주제의 발/찾만 받음) · <code>결과주제 해제</code>\n' +
     '• 현황판 둘 주제(토픽)에서: <code>/특전대 현황판</code> — 결과·활동 시간이 올라올 때마다 그 메시지를 자동 갱신 (끄기: <code>현황판 해제</code>)\n' +
