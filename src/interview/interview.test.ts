@@ -444,3 +444,20 @@ test('후속연결 제목 — 띄어쓰기·소문자·콜론·괄호·이모지
     for (const h of ['▪️후속연결X', '후속연결: X', '후속연결 ❌']) assert.equal(fu(h), 'X', h);
     assert.equal(fu('후속연결 보류'), '보류');
 });
+
+test('방등록 [조직이름] — 등록된 방을 다른 조직으로 옮김, 그 조직 관리자만', async () => {
+    const ROOM2 = -100778;
+    await query(`INSERT INTO cdabot_orgs (name) VALUES ('5기') ON CONFLICT DO NOTHING`);
+    const org2 = (await query(`SELECT id FROM cdabot_orgs WHERE name = '5기'`)).rows[0].id;
+    const org1 = (await query(`SELECT name FROM cdabot_orgs WHERE id = 1`)).rows[0].name;
+    assert.match(await send(ADMIN, '/인터뷰 방등록', ROOM2), /사용할 조직을 선택/); // 조직이 둘이면 골라야 함
+    assert.match(await send(ADMIN, `/인터뷰 방등록 ${org1}`, ROOM2), /인터뷰 결과 방으로 등록/); // 이름을 적으면 바로
+    assert.match(await send(ADMIN, '/인터뷰 방등록 없는조직', ROOM2), /조직이 없거나/);
+    assert.match(await send(ADMIN, '/인터뷰 방등록 5기', ROOM2), /\[5기\] 인터뷰 결과 방으로 등록/);
+    assert.equal((await query(`SELECT org_id FROM cdabot_group_chats WHERE chat_id = $1 AND module_key = $2`, [String(ROOM2), MODULE_KEY])).rows[0].org_id, org2);
+    const u = await upsertUser(4321, '1조직관리자');
+    await upsertMembership(1, u.id, MODULE_KEY, '1조직관리자', 'active');
+    await query(`UPDATE cdabot_memberships SET perms = '{member,manager}' WHERE user_id = $1`, [u.id]);
+    assert.match(await send(4321, '/인터뷰 방등록 5기', ROOM2), /조직이 없거나|권한이 없습니다/); // 5기 관리자가 아니면 불가
+    assert.match(await send(ADMIN, '/인터뷰 조직'), /사용할 조직을 선택/);
+});

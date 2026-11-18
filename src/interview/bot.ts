@@ -1,7 +1,7 @@
 // 인터뷰 추적 모듈 (/인터뷰): 등록된 방에 올린 당일 인터뷰 결과지를 사람별로 저장하고,
 // 카운셀링 봇 행정 DB(students)에 등록됐는지·몇 단계인지 추적. 특전대와 권한·방·데이터 모두 별개
 import { Markup, Telegraf } from 'telegraf';
-import { Access, askOrg, hasPerm, Need, registerModule, resolveAccess, session } from '../core/engine';
+import { Access, askOrg, hasPerm, Need, registerModule, resolveAccess, session, targetOrg } from '../core/engine';
 import { audit, autoEnroll, getGroupOrg, getMember, listMembers, listOrgs, Perm, PERMS, setGroupOrg, setSetting, updateMembership, upsertMembership, upsertUser } from '../core/store';
 import { notifyBoardRoom, refreshBoard } from '../sida/bot';
 import * as R from '../sida/result';
@@ -48,6 +48,7 @@ const ACTIONS: Record<string, Action> = {
     도움말: { label: '❓ 도움말', need: null, place: 'any', run: (ctx) => ctx.reply(HELP, { parse_mode: 'HTML' }) },
     방등록: { need: 'manager', place: 'group', run: registerGroup },
     방해제: { need: 'manager', place: 'group', run: unregisterGroup },
+    조직: { need: null, place: 'any', run: (ctx, a) => askOrg(ctx, MK, a) },
     권한: { need: 'sysadmin', place: 'private', run: setPerms },
     보관기간: { need: 'sysadmin', place: 'private', run: setRetention },
 };
@@ -57,7 +58,7 @@ const placeOk = (ctx: Ctx, x: Action) => x.place === 'any' || (x.place === 'priv
 
 async function dispatch(ctx: Ctx, sub = '', args = '') {
     const a = await access(ctx);
-    if (!a.org) {
+    if (!a.org && !(sub === '방등록' && args.trim())) {
         if (a.orgChoices.length > 1) return askOrg(ctx, MK, a);
         return void (await ctx.reply(`🔒 ${NAME} 기능 권한이 없습니다. 관리자에게 요청하거나, 관리자가 등록한 인터뷰 방에서 결과지를 올려주세요.`));
     }
@@ -484,10 +485,12 @@ async function removeInterview(ctx: Ctx, a: A, args: string) {
 
 /* ====================== 관리 ====================== */
 
-async function registerGroup(ctx: Ctx, a: A) {
-    await setGroupOrg(ctx.chat.id, MK, a.org.id, ctx.chat.title, a.userId);
-    await audit(a.org.id, a.userId, 'interview.group.register', ctx.chat.id);
-    await ctx.reply(`✅ 이 방을 [${a.org.name}] 인터뷰 결과 방으로 등록했습니다.\n이제 이 방에 올리는 결과지(#섭외자/성별/생년월일/연락처/인도자지역/인도자/인터뷰자/…)는 자동 저장됩니다. (해제: /인터뷰 방해제)`);
+async function registerGroup(ctx: Ctx, a: A, args: string) {
+    const org = targetOrg(a, args);
+    if (!org) return void (await ctx.reply(`⚠️ [${args}] 조직이 없거나 그 조직의 관리자가 아닙니다.`));
+    await setGroupOrg(ctx.chat.id, MK, org.id, ctx.chat.title, a.userId);
+    await audit(org.id, a.userId, 'interview.group.register', ctx.chat.id);
+    await ctx.reply(`✅ 이 방을 [${org.name}] 인터뷰 결과 방으로 등록했습니다.\n이제 이 방에 올리는 결과지(#섭외자/성별/생년월일/연락처/인도자지역/인도자/인터뷰자/…)는 자동 저장됩니다. (해제: /인터뷰 방해제)`);
 }
 
 async function unregisterGroup(ctx: Ctx, a: A) {
@@ -532,7 +535,7 @@ const HELP =
     `• <code>/인터뷰 행정 [기간]</code> — 행정에 등록된 인터뷰 대상자를 현재 단계별로 (기본 전체, 개인정보 권한)\n` +
     `• <code>/인터뷰 미등록 [기간]</code> — 후속 O·보류인데 행정에 없는 사람 (개인정보 권한)\n• <code>/인터뷰 검색 이름</code> (개인정보 권한)\n` +
     `• <code>/인터뷰 특전대 [10.26] [향수|당터뷰]</code> — 특전대 기간(주차)에만, 그날 인터뷰한 사람을 특전대 결과로 (모두 발굴, 후속 O 는 찾기도. 미리보기 후 등록)\n` +
-    `• 단체방에서 <code>/인터뷰 방등록</code> · <code>방해제</code>\n` +
+    `• 단체방에서 <code>/인터뷰 방등록 [조직이름]</code> (조직이름을 적으면 그 조직으로, 예: 방등록 5기) · <code>방해제</code> · 1:1 에서 <code>/인터뷰 조직</code> — 조직 바꾸기\n` +
     `• <code>/인터뷰 단계 [10.1~10.24]</code> — 찾등·합등한 인터뷰 대상자 (후속연결 O 포함, 기본 전체 기간, 기간을 적으면 그 기간 완료자만, 개인정보 권한)\n\n` +
     `<b>시스템 관리자</b>: <code>/인터뷰 권한 ID manager,pii [이름]</code> · <code>/인터뷰 보관기간 365</code>\n\n` +
     `행정 등록은 카운셀링 봇 행정 DB에서 <b>이름 + 인도자</b>(인도자가 없으면 지역)로 찾습니다. 같은 이름이 여러 명이면 연결하지 않고 '확인 필요'로 둡니다.`;

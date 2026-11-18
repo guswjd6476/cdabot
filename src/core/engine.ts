@@ -41,6 +41,14 @@ export function hasPerm(a: Pick<Access, 'sysadmin' | 'membership'>, need: Need):
     return a.membership?.status === 'active' && a.membership.perms.includes(need);
 }
 
+// '방등록 5기' 처럼 조직 이름을 적으면 그 조직 (그 조직 관리자·시스템 관리자만, 아니면 undefined). 안 적으면 지금 조직
+//   등록된 방에서는 지금 조직이 그 방의 조직으로 정해지므로, 방을 다른 조직으로 옮길 때 씀
+export function targetOrg(a: Access, name: string) {
+    if (!name) return a.org;
+    const o = a.orgChoices.find((x) => x.name === name);
+    return o && hasPerm({ sysadmin: a.sysadmin, membership: a.memberships.find((m) => m.org_id === o.id) }, 'manager') ? o : undefined;
+}
+
 export async function session(ctx: any): Promise<Record<string, any>> {
     if (!ctx.state.sess) {
         ctx.state.sess = await loadSession(ctx.from.id);

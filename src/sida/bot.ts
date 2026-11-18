@@ -1,7 +1,7 @@
 // 특전대 모듈: 메뉴·명령어, 활동 가능 시간 제출, 당일 결과 제출, 보고서, 관리자 기능
 // 모든 기능은 봇과의 1:1 대화에서만 동작 (단체방에 개인정보가 올라가지 않게)
 import { Markup, Telegraf } from 'telegraf';
-import { Access, askOrg, hasPerm, Need, notifyManagers, registerModule, resolveAccess, session } from '../core/engine';
+import { Access, askOrg, hasPerm, Need, notifyManagers, registerModule, resolveAccess, session, targetOrg } from '../core/engine';
 import { audit, autoEnroll, getGroupOrg, listGroupChats, moveGroupChat, getMember, setGroupOrg, getSettings, listMembers, listOrgs, Membership, Perm, PERMS, setSetting, updateMembership, upsertMembership, upsertUser } from '../core/store';
 import { dayjs, escapeHtml, getErrorMessage, nowKst, parseFlexibleDate, replyLong, splitLongMessage } from '../utils';
 import * as T from './time';
@@ -185,7 +185,7 @@ async function dispatch(ctx: Ctx, sub = '', args = '') {
     delete s.flow; // 다른 메뉴로 이동하면 진행 중인 입력은 취소
     s.current = MK;
     if (sub === '가입') return join(ctx, a, args);
-    if (!a.org) return a.orgChoices.length > 1 ? askOrg(ctx, MK, a) : joinScreen(ctx, a);
+    if (!a.org && !(sub === '방등록' && args.trim())) return a.orgChoices.length > 1 ? askOrg(ctx, MK, a) : joinScreen(ctx, a); // '방등록 5기' 는 조직을 안 골라도 됨
     const action = sub ? ACTIONS[sub] : undefined;
     if (sub && !action) return void (await ctx.reply(`❓ 알 수 없는 명령: ${sub}\n/특전대 도움말 로 사용법을 확인하세요.`));
     if (!action) return menu(ctx, a as A);
@@ -1088,11 +1088,13 @@ async function resultsCsv(ctx: Ctx, a: A, rows: S.ResultRow[], name: string) {
 
 /* ====================== 주차 · 대원 · 설정 관리 ====================== */
 
-async function registerGroup(ctx: Ctx, a: A) {
-    await setGroupOrg(ctx.chat.id, MK, a.org.id, ctx.chat.title, a.userId);
-    await audit(a.org.id, a.userId, 'group.register', ctx.chat.id);
+async function registerGroup(ctx: Ctx, a: A, args: string) {
+    const org = targetOrg(a, args);
+    if (!org) return void (await ctx.reply(`⚠️ [${args}] 조직이 없거나 그 조직의 관리자가 아닙니다.`));
+    await setGroupOrg(ctx.chat.id, MK, org.id, ctx.chat.title, a.userId);
+    await audit(org.id, a.userId, 'group.register', ctx.chat.id);
     await ctx.reply(
-        `✅ 이 방을 [${a.org.name}] ${NAME} 단체방으로 등록했습니다.\n이제 이 방에서 /특전대 를 쓰는 사람은 가입 요청 없이 대원으로 자동 등록됩니다.\n(관리자가 비활성화한 사람은 제외 · 해제: /특전대 방해제)`
+        `✅ 이 방을 [${org.name}] ${NAME} 단체방으로 등록했습니다.\n이제 이 방에서 /특전대 를 쓰는 사람은 가입 요청 없이 대원으로 자동 등록됩니다.\n(관리자가 비활성화한 사람은 제외 · 해제: /특전대 방해제)`
     );
 }
 
@@ -1326,7 +1328,7 @@ const HELP_MANAGER =
     '• <code>/특전대 결과검색 기간:10.1~10.24 인도지역:서울</code>\n' +
     '• <code>/특전대 답장률 [10.1~10.24]</code> — 대원·도구·지역·팀별 발굴 답장률 (기본 이번 주) · <code>만남 [기간]</code> — 2차 만남 일정 (기본 오늘부터 7일)\n' +
     '• <code>/특전대 미제출</code> · <code>부족시간</code> · <code>마감</code> · <code>재개방 [날짜]</code> · <code>주차시작 [시작일] [일수]</code> · <code>주차수정 시작일 [일수]</code> · <code>수정허용 ID</code>\n' +
-    '• 단체방에서: <code>/특전대 방등록</code> (그 방 사람은 가입 요청 없이 자동 대원) · <code>방해제</code>\n' +
+    '• 단체방에서: <code>/특전대 방등록 [조직이름]</code> (그 방 사람은 가입 요청 없이 자동 대원, 조직이름을 적으면 그 조직으로) · <code>방해제</code>\n' +
     '• 결과 주제에서: <code>/특전대 결과주제</code> (그 주제의 발/찾만 받음) · <code>결과주제 해제</code>\n' +
     '• 현황판 둘 주제(토픽)에서: <code>/특전대 현황판</code> — 결과·활동 시간이 올라올 때마다 그 메시지를 자동 갱신 (끄기: <code>현황판 해제</code>)\n' +
     '• <code>/특전대 대원</code> — 이름 눌러 대원/관리자/제외 (대원만 집계) · <code>승인</code> · <code>등록 ID 이름</code> · <code>활성/비활성 ID</code> · <code>이름 ID 새이름</code> · <code>옵션</code> · <code>결과수정 번호</code>';
