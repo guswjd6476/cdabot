@@ -75,7 +75,7 @@ async function menu(ctx: Ctx, a: A) {
     const role = a.sysadmin ? '시스템 관리자' : (a.membership?.perms ?? []).map((p) => PERM_LABEL[p]).join(' · ') || '권한 없음';
     await ctx.reply(`🎙 <b>${NAME} 추적</b> · ${e(a.org.name)}\n👤 ${role}\n\n결과지는 등록된 인터뷰 방에 올리면 자동 저장됩니다.`, {
         parse_mode: 'HTML',
-        ...Markup.inlineKeyboard(items.map(([k, x]) => [btn(x.label!, `iv:a:${k}`)])),
+        ...Markup.inlineKeyboard([...items.map(([k, x]) => [btn(x.label!, `iv:a:${k}`)]), ...(a.orgChoices.length > 1 ? [[btn('🏢 조직(기수) 변경', 'iv:a:조직')]] : [])]),
     });
 }
 
