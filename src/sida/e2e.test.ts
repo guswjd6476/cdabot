@@ -263,6 +263,8 @@ test('[10][12] 결과 수정이 일일 보고서·검색에 반영, 가능 시�
     const ws = nowKst().startOf('day').subtract((nowKst().day() + 6) % 7, 'day');
     const monId = (await S.insertResult({ orgId: 1, userId: await uid(205), kind: 'find', date: ws.format('YYYY-MM-DD'), values: { name: '월요일' }, dedupKey: 't:mon' }))!;
     const day = await send(ADMIN, '/특전대 오늘현황');
+    assert.match(day, /📋 오늘 올라온 결과<\/b> \d+건 \(눌러서 복사\)\n<pre>[^<]*발\/홍길동\//); // 현황판 복사 목록을 그날 전체로
+    assert.match(await send(ADMIN, '/특전대 오늘현황 2000.1.3'), /^(?![\s\S]*올라온 결과)/); // 결과 없는 날은 목록 없음
     const monday = ws.format('YYYY-MM-DD') === nowKst().format('YYYY-MM-DD'); // 월요일엔 '월요일' 건도 당일 결과에 들어감
     if (monday) assert.match(day, /1\. 당일 결과<\/b> — 총 5건 \(발 3건 \(답장온 2 · 답장 안온 1\) · 찾 2건\)/);
     else assert.match(day, /1\. 당일 결과<\/b> — 총 4건 \(발 3건 \(답장온 2 · 답장 안온 1\) · 찾 1건\)\n• U101: 발 3건 \(답장온 2 · 답장 안온 1\) · 찾 1건\n• 0건: /); // 대원별, 2차 만남 일시가 있는 발굴 = 답장온

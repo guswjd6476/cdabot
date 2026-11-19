@@ -31,10 +31,15 @@ export const query = (text: string, params?: unknown[]) => queryable.query(text,
 
 // migrations/*.sql 을 파일명 순서로 1회씩 적용 (적용 기록: cdabot_migrations)
 export async function runMigrations() {
-    await query(`CREATE TABLE IF NOT EXISTS cdabot_migrations (name TEXT PRIMARY KEY, applied_at TIMESTAMPTZ DEFAULT NOW());`);
+    await query(
+        `CREATE TABLE IF NOT EXISTS cdabot_migrations (name TEXT PRIMARY KEY, applied_at TIMESTAMPTZ DEFAULT NOW());`,
+    );
     const dir = path.join(__dirname, '..', 'migrations');
     const applied = new Set((await query(`SELECT name FROM cdabot_migrations;`)).rows.map((r) => r.name));
-    for (const file of fs.readdirSync(dir).filter((f) => f.endsWith('.sql')).sort()) {
+    for (const file of fs
+        .readdirSync(dir)
+        .filter((f) => f.endsWith('.sql'))
+        .sort()) {
         if (applied.has(file)) continue;
         await query(fs.readFileSync(path.join(dir, file), 'utf8'));
         await query(`INSERT INTO cdabot_migrations (name) VALUES ($1);`, [file]);

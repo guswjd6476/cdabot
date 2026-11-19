@@ -387,11 +387,11 @@ test('/인터뷰 특전대 — 특전대 기간을 안 만들어도 결과지 �
     assert.match(calls.filter((c) => c.method === 'sendMessage').map((c) => c.payload.text).join('\n'), /특전대 결과 1건 등록/);
 });
 
-test('/인터뷰 특전대 — 인도자가 동명이인이면 결과지 인도자지역으로 대원 구분 (웹 명단 연결 지역 또는 이름의 (지역))', async () => {
+test('/인터뷰 특전대 — 인도자가 동명이인이면 결과지 인도자지역으로 대원 구분 (웹 명단 연결 지역, 또는 이름에 붙인 지역: 노원이유진), 지역이 다른 대원에게는 안 감', async () => {
     const a = await upsertUser(5151, '이유진');
     await upsertMembership(1, a.id, 'special', '이유진', 'active');
     const b = await upsertUser(5252, '이유진');
-    await upsertMembership(1, b.id, 'special', '이유진(노원)', 'active');
+    await upsertMembership(1, b.id, 'special', '노원이유진', 'active');
     await query(`INSERT INTO members VALUES ('Y1', '이유진', '강북', '1-1'), ('Y2', '이유진', '노원', '2-1')`);
     await query(`INSERT INTO cdabot_online_names (poster_tg, name, member_code) VALUES (5151, '이유진', 'Y1')`); // 강북 이유진은 웹에서 연결
     const sheet = `날짜: 2026.10.1\n구분: 향수행사\n▪️후속연결X\n#강북손님/강북구/이유진/황금새/메모\n#노원손님/노원/이유진/황금새/메모\n#모름손님/성북/이유진/황금새/메모`;

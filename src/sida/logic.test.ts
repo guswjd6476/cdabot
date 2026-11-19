@@ -2,7 +2,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { buildTimetable, dayStatus, mergeSlots, parseRange, parseRanges, parseWeekText, Slot, totalMinutes } from './time';
-import { countBy, meetDate, missingCount, normalizePhone, parseSlashForms, toCsv, validateField } from './result';
+import { countBy, meetDate, mergeSamePerson, missingCount, normalizePhone, parseSlashForms, toCsv, validateField } from './result';
 
 const h = (s: string) => {
     const r = parseRanges(s);
@@ -168,4 +168,27 @@ test('2차 만남 날짜 — 날짜, 내일·요일은 올린 날 기준, 못 �
     assert.equal(meetDate('수요일', '2026-10-24'), '2026-10-28');
     assert.match(meetDate('10.28 19시', '2026-10-24')!, /^\d{4}-10-28$/);
     assert.equal(meetDate('미정', '2026-10-24'), null);
+});
+
+test('같은 사람 결과 합치기 — 같은 종류·인도자·연락처 뒷자리(찾기는 생년월일), 숫자 없거나 0000 이면 같은 이름, 나중 값 우선·빈 칸은 앞에서', () => {
+    const rows = parseSlashForms(
+        [
+            '발/예은/5430/20대 초/여/성북/3/임수현/향수/+11.21,혜화',
+            '발/장형준/7121/20대 초/남/성북/3/임수현/향수',
+            '발/염예은/5430//여/성북/3/임수현/향수',
+            '발/윤지호/0000//남/노원//이유진/당터뷰',
+            '발/유서준/0000/20대 후/남/노원//이유진/당터뷰',
+            '발/윤지호/0000/20대 초/남/노원//이유진/당터뷰',
+            '찾/이주호/070324/강북//이유진',
+            '발/이주호/4193/20대 초/남/강북//이유진/당터뷰',
+            '발/다른사람/7121/20대 초/남/성북/3/장민정/향수', // 뒷자리는 같아도 인도자가 다름
+        ].join('\n')
+    ).map((f) => ({ kind: f.kind, ...f.values }));
+    const out = mergeSamePerson(rows);
+    assert.deepEqual(out.map((r) => [r.kind, r.name]), [
+        ['dig', '염예은'], ['dig', '장형준'], ['dig', '윤지호'], ['dig', '유서준'], ['find', '이주호'], ['dig', '이주호'], ['dig', '다른사람'],
+    ]);
+    assert.equal(out[0].age_group, '20대 초'); // 나중 것의 빈 칸은 앞의 값
+    assert.equal(out[0].meet_at, '11.21');
+    assert.equal(out[2].age_group, '20대 초');
 });

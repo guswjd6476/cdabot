@@ -193,3 +193,26 @@ export function meetDate(meetAt: string, activityDate: string): string | null {
     }
     return null;
 }
+
+// 같은 사람으로 보이는 결과를 한 줄로 (현황판·오늘현황의 복사 목록): 같은 종류 + 같은 인도자 + 연락처 뒷자리(찾기는 생년월일), 숫자가 없거나 0000 이면 같은 이름
+// 나중 것이 이기고, 나중 것에 빈 칸은 앞의 값으로 채움. 자리는 먼저 올라온 곳. rows 는 올라온 순서
+export function mergeSamePerson<T extends { kind: FormKind } & ResultValues>(rows: T[]): T[] {
+    const out: T[] = [];
+    const at = new Map<string, number>();
+    for (const r of rows) {
+        const all = (r.kind === 'dig' ? r.phone : r.birth_date)?.replace(/\D/g, '') ?? '';
+        const digits = r.kind === 'dig' ? all.slice(-4) : all;
+        const name = (r.name ?? '').replace(/\s+/g, '');
+        const who = digits && !/^0+$/.test(digits) ? `d${digits}` : name ? `n${name}` : '';
+        const key = who && `${r.kind}|${(r.guide ?? '').replace(/\s+/g, '')}|${who}`;
+        const i = key ? at.get(key) : undefined;
+        if (i === undefined) {
+            if (key) at.set(key, out.length);
+            out.push(r);
+            continue;
+        }
+        const filled = Object.fromEntries(Object.entries(r).filter(([, v]) => v !== null && v !== undefined && v !== ''));
+        out[i] = { ...out[i], ...filled };
+    }
+    return out;
+}

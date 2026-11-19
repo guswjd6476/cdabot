@@ -692,6 +692,23 @@ async function todayReport(ctx: Ctx, a: A, args: string) {
     const { html, results } = await todayHtml(a.org.id, date);
     const buttons: Buttons = hasPerm(a, 'pii') && results.length ? [[btn('📇 상세 결과 (개인정보)', `sd:td:${date}`)]] : [];
     await show(ctx, `${html}\n\n<b>6. 당일 항목별 집계</b>\n${resultStats(results)}`, buttons);
+    // 현황판의 '올라온 결과' 복사 목록을 그날 것 전체로 (길면 여러 메시지). 개인정보 권한 없으면 이름 가림·연락처 🔒
+    for (const chunk of copyChunks(results, hasPerm(a, 'pii'), date)) await ctx.reply(chunk, { parse_mode: 'HTML' });
+}
+
+function copyChunks(results: S.ResultRow[], pii: boolean, date: string): string[] {
+    if (!results.length) return [];
+    const rows = R.mergeSamePerson([...results].reverse());
+    const head = `<b>📋 ${date === today() ? '오늘' : dayjs(date).format('M/D')} 올라온 결과</b> ${rows.length}건${merged(results, rows)} (눌러서 복사)`;
+    const chunks: string[][] = [[]];
+    let size = 0;
+    for (const r of rows) {
+        const line = formLine(r, pii);
+        if (size + line.length > 3500 && chunks[chunks.length - 1].length) chunks.push([]), (size = 0);
+        chunks[chunks.length - 1].push(line);
+        size += line.length + 1;
+    }
+    return chunks.map((ls, i) => `${i ? `<i>(이어서 ${i + 1}/${chunks.length})</i>` : head}\n<pre>${ls.join('\n')}</pre>`);
 }
 
 // 답장온 발굴 = 2차 만남 일시가 적힌 발굴건 (더 좋은 결과), 없으면 답장 안온 발굴. 발굴 건수 안에서 나눠 표시
@@ -794,18 +811,20 @@ export async function notifyBoardRoom(telegram: Telegraf['telegram'], orgId: num
     if (b) await telegram.sendMessage(b.chatId, html, { parse_mode: 'HTML', message_thread_id: b.threadId });
 }
 // 현황판: 오늘 올라온 결과를 올라온 순서대로 한 줄씩. 코드 블록이라 눌러서 통째로 복사됨
+const merged = (all: unknown[], rows: unknown[]) => (all.length > rows.length ? ` (같은 사람 ${all.length - rows.length}건 합침)` : '');
 function boardList(results: S.ResultRow[], budget: number) {
-    const title = `<b>📋 오늘 올라온 결과</b> ${results.length}건 (눌러서 복사)`;
+    const rows = R.mergeSamePerson([...results].reverse());
+    const title = `<b>📋 오늘 올라온 결과</b> ${rows.length}건${merged(results, rows)} (눌러서 복사)`;
     if (!results.length) return `${title}\n• 아직 없습니다.`;
     const lines: string[] = [];
     let size = title.length + 30;
-    for (const r of [...results].reverse()) {
+    for (const r of rows) {
         const line = formLine(r, true);
         if (size + line.length + 1 > budget) break;
         lines.push(line);
         size += line.length + 1;
     }
-    const more = results.length - lines.length;
+    const more = rows.length - lines.length;
     return `${title}\n<pre>${lines.join('\n')}</pre>${more ? `\n…외 ${more}건 (전체는 관리자 /특전대 오늘현황)` : ''}`;
 }
 
