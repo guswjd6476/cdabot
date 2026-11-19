@@ -331,3 +331,17 @@ export async function guideOwners(orgId: number) {
         return unknown.length === 1 ? pick(unknown[0]) : undefined;
     };
 }
+
+// 그날 결과의 실적 대원을 지금 인도자 칸·인도지역으로 다시 정함 (웹에서 인도지역을 고친 뒤, 예전 규칙으로 들어간 결과). 못 정하는 결과는 그대로
+// 옮긴 결과마다 [결과, 새 대원 이름]
+export async function reassignByGuide(orgId: number, date: string) {
+    const ownerOf = await guideOwners(orgId);
+    const moved: [ResultRow, string][] = [];
+    for (const r of await listResults(orgId, { from: date, to: date })) {
+        const o = ownerOf(r.guide, r.region);
+        if (!o || o.id === r.user_id) continue;
+        await query(`UPDATE cdabot_results SET user_id = $3, updated_at = NOW() WHERE org_id = $1 AND id = $2 AND deleted_at IS NULL;`, [orgId, r.id, o.id]);
+        moved.push([r, o.name]);
+    }
+    return moved;
+}

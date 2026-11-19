@@ -160,6 +160,7 @@ const ACTIONS: Record<string, Action> = {
     재개방: { label: '🔓 제출 재개방', need: 'manager', run: reopenPeriod },
     주차시작: { label: '🆕 새 주차 시작', need: 'manager', run: startPeriod },
     주차수정: { need: 'manager', run: editPeriod },
+    실적정리: { need: 'manager', run: reassign },
     대원: { label: '🧑‍🤝‍🧑 인원·역할 관리', need: 'manager', run: memberList },
     승인: { label: '🙋 가입 승인', need: 'manager', run: pendingList },
     수정허용: { need: 'manager', run: allowEdit },
@@ -700,6 +701,17 @@ async function todayReport(ctx: Ctx, a: A, args: string) {
     await show(ctx, `${html}\n\n<b>6. 당일 항목별 집계</b>\n${resultStats(results)}`, buttons);
     // 현황판의 '올라온 결과' 복사 목록을 그날 것 전체로 (길면 여러 메시지). 개인정보 권한 없으면 이름 가림·연락처 🔒
     for (const chunk of copyChunks(results, hasPerm(a, 'pii'), date)) await ctx.reply(chunk, { parse_mode: 'HTML' });
+}
+
+// /특전대 실적정리 [날짜] — 그날 결과의 대원을 인도자 칸·인도지역으로 다시 정하고 현황판 갱신
+async function reassign(ctx: Ctx, a: A, args: string) {
+    const date = parseFlexibleDate(args) || today();
+    const moved = await S.reassignByGuide(a.org.id, date);
+    await audit(a.org.id, a.userId, 'result.reassign', date, { count: moved.length });
+    if (moved.length) await touchBoard(ctx, a.org.id);
+    const lines = moved.map(([r, to]) => `• #${r.id} ${R.FORMS[r.kind].marker} ${piiCell('name', r.name || '-', !hasPerm(a, 'pii'))} (${e(r.region || '-')}) ${e(r.submitter || '?')} → ${e(to)}`);
+    const body = lines.length ? `\n${lines.join('\n')}` : ' (모두 맞게 들어가 있음)';
+    await replyLong(ctx, `🔁 <b>${dayjs(date).format('M/D')} 실적 정리</b> — ${moved.length}건 옮김${body}`, { parse_mode: 'HTML' });
 }
 
 function copyChunks(results: S.ResultRow[], pii: boolean, date: string): string[] {
@@ -1361,6 +1373,7 @@ const HELP_MEMBER =
 const HELP_MANAGER =
     '\n\n👑 <b>팀 관리자</b> (봇과 1:1 대화)\n' +
     '• <code>/특전대 시간표 [날짜] [요일]</code> · <code>오늘현황 [날짜]</code> · <code>개인현황 [이름]</code>\n' +
+    '• <code>/특전대 실적정리 [날짜]</code> — 그날 결과의 대원을 인도자 칸·인도지역으로 다시 정함 (웹에서 인도지역을 고친 뒤)\n' +
     '• <code>/특전대 결과검색 기간:10.1~10.24 인도지역:서울</code>\n' +
     '• <code>/특전대 답장률 [10.1~10.24]</code> — 대원·도구·지역·팀별 발굴 답장률 (기본 이번 주) · <code>만남 [기간]</code> — 2차 만남 일정 (기본 오늘부터 7일)\n' +
     '• <code>/특전대 미제출</code> · <code>부족시간</code> · <code>마감</code> · <code>재개방 [날짜]</code> · <code>주차시작 [시작일] [일수]</code> · <code>주차수정 시작일 [일수]</code> · <code>수정허용 ID</code>\n' +

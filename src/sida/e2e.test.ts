@@ -620,5 +620,13 @@ test('단체방에 직접 올린 발 줄 — 실적은 인도자 칸·인도지�
     assert.match(out, /인도자 대원 실적으로 2건<\/b>\n.*대신노원 → 노원박하나\n.*대신강북 → 박하나/);
     const rs = (await query(`SELECT r.name, u.telegram_id::text AS tg FROM cdabot_results r JOIN cdabot_users u ON u.id = r.user_id WHERE r.name IN ('대신노원', '대신강북', '내것') ORDER BY r.id`)).rows;
     assert.deepEqual(rs.map((r) => [r.name, r.tg]), [['대신노원', '601'], ['대신강북', '602'], ['내것', '101']]);
+
+    // 예전 규칙으로 강북 대원에게 들어갔고 웹에서 인도지역만 노원으로 고친 결과 → /특전대 실적정리 로 노원 대원에게
+    await query(`UPDATE cdabot_results SET user_id = $1, region = '노원' WHERE name = '대신강북'`, [gangbuk.id]);
+    await query(`UPDATE cdabot_results SET user_id = $1 WHERE name = '대신노원'`, [gangbuk.id]);
+    assert.match(await send(101, '/특전대 실적정리'), /권한이 없습니다/);
+    const fixed = await send(ADMIN, '/특전대 실적정리');
+    assert.match(fixed, /실적 정리<\/b> — 2건 옮김\n• #\d+ 발 .* \(노원\) 박하나 → 노원박하나\n• #\d+ 발 .* \(노원\) 박하나 → 노원박하나/);
+    assert.match(await send(ADMIN, '/특전대 실적정리'), /0건 옮김 \(모두 맞게 들어가 있음\)/);
     for (const r of (await S.listResults(1)).filter((x) => ['대신노원', '대신강북', '내것'].includes(x.name!))) await S.deleteResult(1, r.id);
 });
