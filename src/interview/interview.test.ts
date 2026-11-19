@@ -8,10 +8,10 @@ import { query, runMigrations, setQueryable } from '../db';
 import { registerCore } from '../core/engine';
 import { setSetting, upsertMembership, upsertUser } from '../core/store';
 import { registerSida } from '../sida/bot';
-import { registerInterview, syncAdminFinds } from './bot';
+import { captureBoards, registerInterview, syncAdminFinds } from './bot';
 import { nowKst } from '../utils';
 import { parseInterviewSheet, sheetKind } from './parse';
-import { MODULE_KEY, purgeExpiredInterviews } from './store';
+import { getBoard, MODULE_KEY, purgeExpiredInterviews } from './store';
 import { createPeriod, insertResult } from '../sida/store';
 import { ageGroup, birth6, genderOf, interviewToForms, meetOf } from './toSida';
 
@@ -159,6 +159,7 @@ let calls: { method: string; payload: any }[] = [];
 };
 const bot = new Telegraf('1:TEST');
 bot.botInfo = { id: 1, is_bot: true, first_name: 'sida', username: 'sidabot' } as any;
+captureBoards(bot);
 registerCore(bot);
 registerSida(bot); // 특전대와 같이 돌 때 서로 간섭하지 않는지
 registerInterview(bot);
@@ -460,4 +461,18 @@ test('방등록 [조직이름] — 등록된 방을 다른 조직으로 옮김, 
     await query(`UPDATE cdabot_memberships SET perms = '{member,manager}' WHERE user_id = $1`, [u.id]);
     assert.match(await send(4321, '/인터뷰 방등록 5기', ROOM2), /조직이 없거나|권한이 없습니다/); // 5기 관리자가 아니면 불가
     assert.match(await send(ADMIN, '/인터뷰 조직'), /사용할 조직을 선택/);
+});
+
+test('maeum 누적 결과지 — 고쳐 올린 글을 날짜별로 저장 (날짜 줄 우선, 없으면 올린 날), 인터뷰 저장도 그대로', async () => {
+    const board = (date: string, extra: string) =>
+        `구분 : 향수행사\n날짜 :${date}\n\n✔️ 당터뷰 후 바로 누적\n섭외자/성별/생년월일/연락처/인도자지역/인도자/인터뷰자/다음 만남예정일, 장소/간단정보\n\n▪️후속연결O\n#장형준/남/040309/7121/성북/임수현/홍세라/12.21(월) 16:00/핵심감정 부담감${extra}\n\n▪️후속연결 보류\n\n▪️후속연결 X`;
+    const ROOM = -100990; // 등록 안 된 방
+    await send(301, board(' 11.19', ' · INFJ'), ROOM);
+    const y = nowKst().year();
+    assert.match((await getBoard(ROOM, `${nowKst().month() >= 5 ? y : y - 1}-11-19`))!, /INFJ/);
+    await send(301, board('', ''), ROOM); // 날짜 칸이 비면 오늘
+    assert.match((await getBoard(ROOM, nowKst().format('YYYY-MM-DD')))!, /#장형준/);
+    assert.match(await send(301, board('', ' · 자취중'), GROUP), /인터뷰 결과 1명 저장/); // 등록된 인터뷰 방에서는 저장 답장도
+    assert.match((await getBoard(GROUP, nowKst().format('YYYY-MM-DD')))!, /자취중/);
+    assert.equal(await getBoard(ROOM, '2000-01-01'), null);
 });

@@ -212,3 +212,22 @@ export async function purgeExpiredInterviews(): Promise<number> {
     }
     return total;
 }
+
+/* ====================== maeum 누적 결과지 ====================== */
+
+export async function saveBoard(chatId: number, day: string, text: string) {
+    await query(
+        `INSERT INTO cdabot_boards (chat_id, day, text) VALUES ($1, $2, $3)
+         ON CONFLICT (chat_id, day) DO UPDATE SET text = EXCLUDED.text, updated_at = NOW();`,
+        [chatId, day, text]
+    );
+}
+
+export async function getBoard(chatId: number, day: string): Promise<string | null> {
+    return (await query(`SELECT text FROM cdabot_boards WHERE chat_id = $1 AND day = $2;`, [chatId, day])).rows[0]?.text ?? null;
+}
+
+// 이름·연락처가 든 글이라 오래 두지 않음 (maeum 은 최근 며칠 것만 고침)
+export async function purgeOldBoards(): Promise<number> {
+    return (await query(`DELETE FROM cdabot_boards WHERE day < CURRENT_DATE - 30 RETURNING day;`)).rows.length;
+}

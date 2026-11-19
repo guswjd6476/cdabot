@@ -9,8 +9,8 @@ import { getErrorMessage, nowKst } from './utils';
 import { describeAccess, isSysadmin, registerCore } from './core/engine';
 import { registerSida } from './sida/bot';
 import { handleRelay, publishRelay, registerOnline, relaySecretOk, sendDailyInstaReports } from './online/bot';
-import { registerInterview, syncAdminFinds } from './interview/bot';
-import { purgeExpiredInterviews } from './interview/store';
+import { captureBoards, registerInterview, syncAdminFinds } from './interview/bot';
+import { getBoard, purgeExpiredInterviews, purgeOldBoards } from './interview/store';
 import { purgeExpiredPii } from './sida/store';
 
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
@@ -27,6 +27,9 @@ const bot = new Telegraf(BOT_TOKEN);
 bot.catch((err: unknown, ctx) => {
     console.error(`[Telegraf 처리 에러] Chat ID: ${ctx.chat?.id}`, err);
 });
+
+// maeum 누적 결과지를 고쳐 올린 글 저장 — 다른 기능이 메시지를 가져가기 전에
+captureBoards(bot);
 
 // 공통 엔진 (입력 세션, 단체방 버튼 보호, /홈, /조직, 준비 중 역할 안내)
 registerCore(bot);
@@ -77,6 +80,7 @@ async function nightJob() {
     if (purged) console.log(`🗂 [개인정보 보관기간 만료] ${purged}건 이름·연락처 삭제`);
     const purgedIv = await purgeExpiredInterviews();
     if (purgedIv) console.log(`🗂 [인터뷰 개인정보 보관기간 만료] ${purgedIv}건 삭제`);
+    await purgeOldBoards();
 }
 
 /* =====================================================
@@ -114,6 +118,31 @@ const server = http.createServer(async (req, res) => {
             return res.end(JSON.stringify(actions));
         } catch (err: unknown) {
             console.error('[카운셀링 봇 전달 에러]:', getErrorMessage(err));
+            res.writeHead(500, { 'Content-Type': 'text/plain; charset=utf-8' });
+            return res.end('Failed');
+        }
+    }
+
+    // maeum(코칭존)이 고쳐 올린 누적 결과지를 읽음: GET /board?chat=<방 ID>&day=YYYY-MM-DD, 헤더 x-board-secret = BOARD_SECRET (없으면 막음)
+    if (req.method === 'GET' && route === '/board') {
+        const secret = process.env.BOARD_SECRET;
+        const given = Buffer.from(String(req.headers['x-board-secret'] || ''));
+        if (!secret || given.length !== Buffer.byteLength(secret) || !crypto.timingSafeEqual(given, Buffer.from(secret))) {
+            res.writeHead(403, { 'Content-Type': 'text/plain; charset=utf-8' });
+            return res.end('Forbidden');
+        }
+        const chat = Number(url.searchParams.get('chat'));
+        const day = url.searchParams.get('day') || '';
+        if (!Number.isSafeInteger(chat) || !/^\d{4}-\d{2}-\d{2}$/.test(day)) {
+            res.writeHead(400, { 'Content-Type': 'text/plain; charset=utf-8' });
+            return res.end('Bad request');
+        }
+        try {
+            const text = await getBoard(chat, day);
+            res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+            return res.end(JSON.stringify({ text }));
+        } catch (err: unknown) {
+            console.error('[누적 결과지 읽기 에러]:', getErrorMessage(err));
             res.writeHead(500, { 'Content-Type': 'text/plain; charset=utf-8' });
             return res.end('Failed');
         }

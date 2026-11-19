@@ -6,7 +6,7 @@ import { audit, autoEnroll, getGroupOrg, getMember, listMembers, listOrgs, Perm,
 import { notifyBoardRoom, refreshBoard } from '../sida/bot';
 import * as R from '../sida/result';
 import * as SS from '../sida/store';
-import { dayjs, escapeHtml as e, nowKst, parseFlexibleDate, replyLong } from '../utils';
+import { dayjs, escapeHtml as e, nowKst, parseFlexibleDate, replyLong, TZ } from '../utils';
 import { FOLLOW_UPS, InterviewKind, parseInterviewSheet, sheetKind } from './parse';
 import * as S from './store';
 import { interviewToForms } from './toSida';
@@ -98,7 +98,8 @@ async function handleSheet(ctx: Ctx, text: string): Promise<boolean> {
         await ctx.reply('🚫 결과를 저장할 수 없는 계정입니다. 관리자에게 문의해주세요.');
         return true;
     }
-    const dateLine = text.normalize('NFKC').match(/^\s*(?:날짜|인터뷰일|일자)\s*[:：]?\s*(.+)$/m);
+    // 빈 '날짜 :' 칸(maeum 누적 양식)이면 다음 줄을 날짜로 읽지 않고 오늘
+    const dateLine = text.normalize('NFKC').match(/^\s*(?:날짜|인터뷰일|일자)[ \t]*[:：]?[ \t]*([^\s:：].*)$/m);
     const date = dateLine ? parseFlexibleDate(dateLine[1]) : today();
     if (!date || date > today()) {
         await ctx.reply(`⚠️ 날짜를 확인해주세요: "${dateLine?.[1].trim()}" (예: 날짜: 10.20 — 오늘 이후 날짜는 안 됨). 저장하지 않았습니다.`);
@@ -539,6 +540,21 @@ const HELP =
     `• <code>/인터뷰 단계 [10.1~10.24]</code> — 찾등·합등한 인터뷰 대상자 (후속연결 O 포함, 기본 전체 기간, 기간을 적으면 그 기간 완료자만, 개인정보 권한)\n\n` +
     `<b>시스템 관리자</b>: <code>/인터뷰 권한 ID manager,pii [이름]</code> · <code>/인터뷰 보관기간 365</code>\n\n` +
     `행정 등록은 카운셀링 봇 행정 DB에서 <b>이름 + 인도자</b>(인도자가 없으면 지역)로 찾습니다. 같은 이름이 여러 명이면 연결하지 않고 '확인 필요'로 둡니다.`;
+
+// maeum(코칭존)이 보낸 누적 결과지를 단체방에서 복사해 고쳐 올리면 그 글을 날짜별로 저장 → maeum 이 /board 로 읽어 다음 신청을 그 뒤에 이어 붙임
+// 날짜는 '날짜 : 11.19' 줄, 없으면 올린 날. 방 등록과 상관없이 저장하고 다른 기능으로 넘김
+// shortcut: 텔레그램이 4096자 넘는 글을 둘로 나누면 앞부분만 저장됨 (빠진 사람은 maeum 이 다시 붙임). 자주 넘으면 이어지는 글도 합침
+export function captureBoards(bot: Telegraf<any>) {
+    bot.on('message', async (ctx: Ctx, next: () => Promise<void>) => {
+        const text: string | undefined = ctx.message?.text;
+        if (ctx.chat?.type !== 'private' && text && text.includes('당터뷰 후 바로 누적') && /후속\s*연결/.test(text)) {
+            const line = text.normalize('NFKC').match(/^\s*날짜[ \t]*[:：]?[ \t]*([^\s:：].*)$/m);
+            const day = (line && parseFlexibleDate(line[1])) || dayjs.unix(ctx.message.date).tz(TZ).format('YYYY-MM-DD');
+            await S.saveBoard(ctx.chat.id, day, text).catch((err) => console.error('[누적 결과지 저장 실패]:', err));
+        }
+        return next();
+    });
+}
 
 export function registerInterview(bot: Telegraf<any>) {
     registerModule({ key: MK, name: NAME, openMenu: (ctx) => dispatch(ctx), help: HELP });
