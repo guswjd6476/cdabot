@@ -25,6 +25,9 @@ export const FIELD_KEYS = RESULT_FIELDS.map((f) => f.key) as FieldKey[];
 export const fieldLabel = (k: FieldKey) => RESULT_FIELDS.find((f) => f.key === k)!.label;
 
 export type FormKind = 'dig' | 'find';
+
+// 지역 순서 (온라인 전도 현황·취합, 대원 이름에 붙인 지역 읽기)
+export const REGIONS = ['도봉', '성북', '노원', '중랑', '강북', '대학', '새신자', '이음'];
 export const FORMS: Record<FormKind, { label: string; marker: string; fields: FieldKey[]; template: string }> = {
     dig: {
         label: '발굴건',

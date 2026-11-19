@@ -1,8 +1,8 @@
 // 특전대 모듈 데이터: 취합 주차, 활동 가능 시간, 당일 결과, 선택 목록, 시간표 스냅샷
 import { query } from '../db';
-import { listModuleSettings } from '../core/store';
+import { listMembers, listModuleSettings } from '../core/store';
 import { DayInput, Slot, WEEKDAYS } from './time';
-import { FIELD_KEYS, FieldKey, FormKind, ResultValues } from './result';
+import { FIELD_KEYS, FieldKey, FormKind, REGIONS, ResultValues } from './result';
 
 export const MODULE_KEY = 'special';
 
@@ -303,4 +303,31 @@ export async function memberInfo(members: { telegram_id: string; display_name: s
         [members.map((m) => m.telegram_id), members.map((m) => m.display_name)]
     ).catch(() => ({ rows: [] as any[] }));
     return new Map(r.rows.map((x) => [x.tg as string, { region: x.region ?? null, team: x.team ?? null }]));
+}
+
+// 인도자 이름 → 특전대 대원. 대원 이름에 지역을 붙여 써도('노원이유진'·'노원/이유진'·'이유진(노원)') 같은 이름으로 봄
+// 인터뷰 결과지와 단체방에 직접 올린 발/찾 줄 모두 이걸로 실적 대원을 정함
+// 결과지(또는 줄)에 인도자지역이 있으면 대원 지역(웹 명단 연결, 없으면 이름에 쓴 지역)이 맞는 한 명. 맞는 사람이 없으면 지역을 모르는 대원이 한 명일 때만 그 사람
+//   → 지역이 다른 동명이인(강북 이유진)에게 노원 결과가 가지 않음. 아무도 안 맞으면 등록하지 않고 '제외'로 알림
+// info: 그 대원의 명단 지역·팀 (결과의 인도지역·인도팀으로 씀)
+export async function guideOwners(orgId: number) {
+    const members = await listMembers(orgId, MODULE_KEY);
+    const info = await memberInfo(members);
+    const plain = (n: string) => n.replace(/\([^)]*\)|[\s/·_-]+/g, '');
+    const key = (n: string) => {
+        const k = plain(n).replace(new RegExp(REGIONS.join('|'), 'g'), '');
+        return k.length >= 2 ? k : plain(n);
+    };
+    const regionOf = (m: (typeof members)[number]) => info.get(m.telegram_id)?.region ?? REGIONS.find((r) => m.display_name.includes(r)) ?? null;
+    const sameRegion = (a: string, b: string) => !!a && !!b && (a.includes(b) || b.includes(a)); // '강북구' = '강북'
+    const pick = (m?: (typeof members)[number]) => m && { id: m.user_id, name: m.display_name, info: info.get(m.telegram_id) };
+    return (g?: string | null, region?: string | null) => {
+        if (!g) return undefined;
+        const cands = members.filter((m) => key(m.display_name) === key(g));
+        if (!region?.trim()) return cands.length === 1 ? pick(cands[0]) : undefined;
+        const same = cands.filter((m) => sameRegion(regionOf(m) ?? '', region.trim()));
+        if (same.length) return same.length === 1 ? pick(same[0]) : undefined;
+        const unknown = cands.filter((m) => !regionOf(m));
+        return unknown.length === 1 ? pick(unknown[0]) : undefined;
+    };
 }

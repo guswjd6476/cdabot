@@ -2,7 +2,7 @@
 // 카운셀링 봇 행정 DB(students)에 등록됐는지·몇 단계인지 추적. 특전대와 권한·방·데이터 모두 별개
 import { Markup, Telegraf } from 'telegraf';
 import { Access, askOrg, hasPerm, Need, registerModule, resolveAccess, session, targetOrg } from '../core/engine';
-import { audit, autoEnroll, getGroupOrg, getMember, listMembers, listOrgs, Perm, PERMS, setGroupOrg, setSetting, updateMembership, upsertMembership, upsertUser } from '../core/store';
+import { audit, autoEnroll, getGroupOrg, getMember, listOrgs, Perm, PERMS, setGroupOrg, setSetting, updateMembership, upsertMembership, upsertUser } from '../core/store';
 import { notifyBoardRoom, refreshBoard } from '../sida/bot';
 import * as R from '../sida/result';
 import * as SS from '../sida/store';
@@ -10,7 +10,6 @@ import { dayjs, escapeHtml as e, nowKst, parseFlexibleDate, replyLong, TZ } from
 import { FOLLOW_UPS, InterviewKind, parseInterviewSheet, sheetKind } from './parse';
 import * as S from './store';
 import { interviewToForms } from './toSida';
-import { REGIONS } from '../online/bot';
 
 const NAME = '인터뷰';
 const MK = S.MODULE_KEY;
@@ -145,33 +144,6 @@ const KIND_CODE: Record<InterviewKind, string> = { 향수행사: 'h', 당터뷰:
 const kindOfCode = (c: string): InterviewKind | undefined => (c === 'h' ? '향수행사' : c === 'd' ? '당터뷰' : undefined);
 const SIDA_MK = SS.MODULE_KEY; // 특전대 대원 모듈 ('special')
 
-
-// 인도자 이름 → 특전대 대원. 대원 이름에 지역을 붙여 써도('노원이유진'·'노원/이유진'·'이유진(노원)') 같은 이름으로 봄
-// 결과지에 인도자지역이 있으면 대원 지역(웹 명단 연결, 없으면 이름에 쓴 지역)이 맞는 한 명. 맞는 사람이 없으면 지역을 모르는 대원이 한 명일 때만 그 사람
-//   → 지역이 다른 동명이인(강북 이유진)에게 노원 결과가 가지 않음. 아무도 안 맞으면 등록하지 않고 '제외'로 알림
-// info: 그 대원의 명단 지역·팀 (결과의 인도지역·인도팀으로 씀)
-async function sidaOwners(orgId: number) {
-    const members = await listMembers(orgId, SIDA_MK);
-    const info = await SS.memberInfo(members);
-    const plain = (n: string) => n.replace(/\([^)]*\)|[\s/·_-]+/g, '');
-    const key = (n: string) => {
-        const k = plain(n).replace(new RegExp(REGIONS.join('|'), 'g'), '');
-        return k.length >= 2 ? k : plain(n);
-    };
-    const regionOf = (m: (typeof members)[number]) => info.get(m.telegram_id)?.region ?? REGIONS.find((r) => m.display_name.includes(r)) ?? null;
-    const sameRegion = (a: string, b: string) => !!a && !!b && (a.includes(b) || b.includes(a)); // '강북구' = '강북'
-    const pick = (m?: (typeof members)[number]) => m && { id: m.user_id, name: m.display_name, info: info.get(m.telegram_id) };
-    return (g?: string | null, region?: string | null) => {
-        if (!g) return undefined;
-        const cands = members.filter((m) => key(m.display_name) === key(g));
-        if (!region?.trim()) return cands.length === 1 ? pick(cands[0]) : undefined;
-        const same = cands.filter((m) => sameRegion(regionOf(m) ?? '', region.trim()));
-        if (same.length) return same.length === 1 ? pick(same[0]) : undefined;
-        const unknown = cands.filter((m) => !regionOf(m));
-        return unknown.length === 1 ? pick(unknown[0]) : undefined;
-    };
-}
-
 // 특전대 기간에 발굴한 사람의 인터뷰 사후 보고서가 카운셀링 봇에 후속 [신청]으로 올라오면(만남 확인) 특전대 찾기건으로 자동 등록
 //   → 현황판·웹 반영. 서버가 매일 23:50(KST)에 호출. 이번 특전대 주차 안에 올라온 것만, 실적은 그 발굴건을 올린 대원, 같은 이름 찾기건이 이미 있으면(인터뷰 후속 O 등) 안 넣음
 export async function syncAdminFinds(telegram: Telegraf['telegram']) {
@@ -209,7 +181,7 @@ async function sidaPlan(a: A, date: string, kind?: InterviewKind) {
         adminError = true;
     }
     const opts = await SS.listOptions(a.org.id);
-    const ownerOf = await sidaOwners(a.org.id);
+    const ownerOf = await SS.guideOwners(a.org.id);
     const items = people.flatMap((r) => {
         const owner = ownerOf(r.guides[0], r.region);
         // 인도지역·인도팀: 실적 대원의 명단 연결(구역까지) 우선, 없으면 행정에서 인도자 이름으로 찾은 것

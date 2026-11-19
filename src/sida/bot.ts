@@ -544,7 +544,10 @@ async function handleFreeForm(ctx: Ctx, text: string): Promise<boolean> {
     const saved: string[] = [];
     const skipped: string[] = [];
     const warned: string[] = [];
+    const credited: string[] = [];
     const seen = new Set<string>();
+    // 실적은 인도자 칸 + 인도지역에 맞는 대원 (남의 몫을 대신 올려도 그 대원에게). 인도자가 대원이 아니거나 못 정하면 올린 사람
+    const ownerOf = await S.guideOwners(a.org.id);
     for (const [i, form] of forms.entries()) {
         const one = R.cleanForm(form, opts);
         const p = R.personOf(one.kind, form.values); // 형식이 틀린 값도 입력 그대로 비교
@@ -555,8 +558,10 @@ async function handleFreeForm(ctx: Ctx, text: string): Promise<boolean> {
             continue;
         }
         if (key) seen.add(key);
-        const id = await S.insertResult({ orgId: a.org.id, userId: a.userId, kind: one.kind, date: today(), values: one.values, dedupKey: `${base}:${i}` });
+        const owner = ownerOf(one.values.guide, one.values.region);
+        const id = await S.insertResult({ orgId: a.org.id, userId: owner?.id ?? a.userId, kind: one.kind, date: today(), values: one.values, dedupKey: `${base}:${i}` });
         if (!id) continue; // 같은 메시지가 다시 들어온 경우
+        if (owner && owner.id !== a.userId) credited.push(`#${id} ${label} → ${e(owner.name)}`);
         await audit(a.org.id, a.userId, 'result.create', id, { kind: one.kind, bulk: true });
         const empty = R.missingCount({ kind: one.kind, ...one.values });
         const extra = [...one.notes, ...(empty ? [`빈 칸 ${empty}개`] : [])];
@@ -565,12 +570,13 @@ async function handleFreeForm(ctx: Ctx, text: string): Promise<boolean> {
     }
     if (saved.length) await touchBoard(ctx, a.org.id);
     // 문제없이 저장되면 답장 대신 👍 반응만 (현황은 결과 공유방 현황판에 반영됨). 확인할 게 있을 때만 답장
-    if (!warned.length && !skipped.length) {
+    if (!warned.length && !skipped.length && !credited.length) {
         if (saved.length) await ctx.react('👍').catch(() => {});
         return true;
     }
     await ctx.reply(
         `✅ <b>결과 ${saved.length}건 저장</b>` +
+            (credited.length ? `\n\n👤 <b>인도자 대원 실적으로 ${credited.length}건</b>\n${credited.join('\n')}` : '') +
             (warned.length ? `\n\n⚠️ <b>확인 필요 ${warned.length}건</b>\n${warned.join('\n')}\n고치기: <code>/특전대 내결과</code>` : '') +
             (skipped.length ? `\n\n⏭ <b>중복 제외 ${skipped.length}건</b> (이미 등록된 사람)\n${skipped.join('\n')}` : ''),
         { parse_mode: 'HTML' }

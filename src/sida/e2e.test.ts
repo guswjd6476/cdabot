@@ -604,3 +604,21 @@ test('결과 주제 — 지정한 주제에서만 발/찾 받음', async () => {
     await inTopic(101, '발/주제밖/010-1111-9999', 9);
     assert.ok((await names()).includes('주제밖')); // 해제 후엔 어느 주제든 받음
 });
+
+test('단체방에 직접 올린 발 줄 — 실적은 인도자 칸·인도지역에 맞는 대원 (남의 몫을 대신 올려도), 못 정하면 올린 사람', async () => {
+    await query(`CREATE TABLE IF NOT EXISTS members ("고유번호" TEXT PRIMARY KEY, "이름" TEXT, "지역" TEXT, "구역" TEXT);`);
+    await query(`INSERT INTO members VALUES ('P1', '박하나', '강북', '2-1'), ('P2', '박하나', '노원', '사랑-1')`);
+    const nowon = await upsertUser(601, '박하나');
+    await upsertMembership(1, nowon.id, S.MODULE_KEY, '노원박하나', 'active'); // 이름에 지역을 붙여 씀
+    const gangbuk = await upsertUser(602, '박하나');
+    await upsertMembership(1, gangbuk.id, S.MODULE_KEY, '박하나', 'active');
+    await query(`INSERT INTO cdabot_online_names (poster_tg, name, member_code) VALUES (602, '박하나', 'P1')`); // 강북 박하나는 웹에서 연결
+    const out = await send(
+        101,
+        '발/대신노원/1212/20대 초/여/노원/사랑/박하나/당터뷰\n발/대신강북/1313/20대 초/여/강북/2/박하나/당터뷰\n발/내것/1414/20대 초/여/성북/1/없는사람/당터뷰'
+    );
+    assert.match(out, /인도자 대원 실적으로 2건<\/b>\n.*대신노원 → 노원박하나\n.*대신강북 → 박하나/);
+    const rs = (await query(`SELECT r.name, u.telegram_id::text AS tg FROM cdabot_results r JOIN cdabot_users u ON u.id = r.user_id WHERE r.name IN ('대신노원', '대신강북', '내것') ORDER BY r.id`)).rows;
+    assert.deepEqual(rs.map((r) => [r.name, r.tg]), [['대신노원', '601'], ['대신강북', '602'], ['내것', '101']]);
+    for (const r of (await S.listResults(1)).filter((x) => ['대신노원', '대신강북', '내것'].includes(x.name!))) await S.deleteResult(1, r.id);
+});

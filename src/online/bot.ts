@@ -5,14 +5,14 @@ import crypto from 'crypto';
 import { Telegraf } from 'telegraf';
 import { isSysadmin } from '../core/engine';
 import { query } from '../db';
-import { parseSlashForms } from '../sida/result';
+import { parseSlashForms, REGIONS } from '../sida/result';
 import { dayjs, escapeHtml as e, getErrorMessage, nowKst, parseFlexibleDate, replyLong } from '../utils';
 
 type Ctx = any;
 const today = () => nowKst().format('YYYY-MM-DD');
 const md = (d: string) => `${Number(d.slice(5, 7))}.${Number(d.slice(8, 10))}`;
 
-export const REGIONS = ['도봉', '성북', '노원', '중랑', '강북', '대학', '새신자', '이음'];
+export { REGIONS };
 const NOT_PROFILE = new Set(['p', 'reel', 'reels', 'stories', 'explore', 'tv', 'accounts', 's']);
 
 /* ====================== 파싱 ====================== */
