@@ -721,7 +721,13 @@ function perPerson(rows: S.ResultRow[], members: Membership[]) {
 async function todayHtml(orgId: number, date: string) {
     const { period, from, name } = await resultRange(orgId, date);
     const w = weekdayOf(date);
-    const [{ members, subs, min }, week] = await Promise.all([loadWeek(orgId, period), S.listResults(orgId, { from, to: date })]);
+    const [{ members: raw, subs, min }, week] = await Promise.all([loadWeek(orgId, period), S.listResults(orgId, { from, to: date })]);
+    // 이름 앞에 지역 — 지역이 다른 동명이인 구분 (이미 이름에 지역을 적었으면 그대로)
+    const regions = await S.memberRegions(raw);
+    const members = raw.map((m) => {
+        const reg = regions.get(m.telegram_id);
+        return reg && !m.display_name.includes(reg) ? { ...m, display_name: `${reg}/${m.display_name}` } : m;
+    });
     const results = week.filter((r) => r.activity_date === date);
     const people = weekTable(members, subs, min, w).people;
     const count = (st: T.DayStatus) => people.filter((p) => p.status === st).length;

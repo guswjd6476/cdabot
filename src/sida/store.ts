@@ -287,3 +287,17 @@ export async function removeOption(orgId: number, field: string, value: string):
 export async function saveSnapshot(periodId: number, userId: number | null, data: unknown) {
     await query(`INSERT INTO cdabot_schedule_snapshots (period_id, generated_by, data) VALUES ($1, $2, $3);`, [periodId, userId, JSON.stringify(data)]);
 }
+
+// 대원 지역 (웹 명단 members): 웹 '온라인 전도'에서 텔레그램 계정과 연결한 명단이 있으면 그 지역, 없으면 이름이 같은 사람이 명단에 한 명뿐일 때 그 지역
+// members 표가 없거나 읽기 실패하면 빈 값 (현황판은 지역 없이 그대로)
+export async function memberRegions(members: { telegram_id: string; display_name: string }[]): Promise<Map<string, string>> {
+    if (!members.length) return new Map();
+    const r = await query(
+        `SELECT t.tg, COALESCE(
+                (SELECT m."지역" FROM cdabot_online_names n JOIN members m ON m."고유번호" = n.member_code WHERE n.poster_tg = t.tg::bigint),
+                (SELECT min(m."지역") FROM members m WHERE m."이름" = t.name HAVING count(*) = 1)) AS region
+         FROM unnest($1::text[], $2::text[]) AS t(tg, name);`,
+        [members.map((m) => m.telegram_id), members.map((m) => m.display_name)]
+    ).catch(() => ({ rows: [] as any[] }));
+    return new Map(r.rows.filter((x) => x.region).map((x) => [x.tg as string, x.region as string]));
+}
