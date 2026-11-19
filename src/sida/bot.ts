@@ -2,7 +2,7 @@
 // 모든 기능은 봇과의 1:1 대화에서만 동작 (단체방에 개인정보가 올라가지 않게)
 import { Markup, Telegraf } from 'telegraf';
 import { Access, askOrg, hasPerm, Need, notifyManagers, registerModule, resolveAccess, session, targetOrg } from '../core/engine';
-import { audit, autoEnroll, getGroupOrg, listGroupChats, moveGroupChat, getMember, setGroupOrg, getSettings, listMembers, listOrgs, Membership, Perm, PERMS, setSetting, updateMembership, upsertMembership, upsertUser } from '../core/store';
+import { audit, autoEnroll, listModuleSettings, getGroupOrg, listGroupChats, moveGroupChat, getMember, setGroupOrg, getSettings, listMembers, listOrgs, Membership, Perm, PERMS, setSetting, updateMembership, upsertMembership, upsertUser } from '../core/store';
 import { dayjs, escapeHtml, getErrorMessage, nowKst, parseFlexibleDate, replyLong, splitLongMessage } from '../utils';
 import * as T from './time';
 import * as R from './result';
@@ -723,9 +723,9 @@ async function todayHtml(orgId: number, date: string) {
     const w = weekdayOf(date);
     const [{ members: raw, subs, min }, week] = await Promise.all([loadWeek(orgId, period), S.listResults(orgId, { from, to: date })]);
     // 이름 앞에 지역 — 지역이 다른 동명이인 구분 (이미 이름에 지역을 적었으면 그대로)
-    const regions = await S.memberRegions(raw);
+    const info = await S.memberInfo(raw);
     const members = raw.map((m) => {
-        const reg = regions.get(m.telegram_id);
+        const reg = info.get(m.telegram_id)?.region;
         return reg && !m.display_name.includes(reg) ? { ...m, display_name: `${reg}/${m.display_name}` } : m;
     });
     const results = week.filter((r) => r.activity_date === date);
@@ -782,6 +782,11 @@ export async function refreshBoard(telegram: Telegraf['telegram'], orgId: number
     }
     const m = await telegram.sendMessage(b.chatId, html, { parse_mode: 'HTML', message_thread_id: b.threadId });
     await setSetting(orgId, MK, 'board', { ...b, date, messageId: m.message_id });
+}
+// 웹에서 명단 연결을 바꿨을 때 (POST /refresh-boards) — 현황판이 있는 조직마다 다시 그림
+export async function refreshAllBoards(telegram: Telegraf['telegram']) {
+    for (const { org_id, settings } of await listModuleSettings(MK))
+        if (settings?.board) await refreshBoard(telegram, org_id).catch((err) => console.error(`[현황판 갱신 실패] 조직 ${org_id}:`, getErrorMessage(err)));
 }
 // 현황판 방(주제)에 알림 보내기. 현황판이 없으면 안 보냄
 export async function notifyBoardRoom(telegram: Telegraf['telegram'], orgId: number, html: string) {

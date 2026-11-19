@@ -7,7 +7,7 @@ import { Telegraf } from 'telegraf';
 import { runMigrations } from './db';
 import { getErrorMessage, nowKst } from './utils';
 import { describeAccess, isSysadmin, registerCore } from './core/engine';
-import { registerSida } from './sida/bot';
+import { refreshAllBoards, registerSida } from './sida/bot';
 import { handleRelay, publishRelay, registerOnline, relaySecretOk, sendDailyInstaReports } from './online/bot';
 import { captureBoards, registerInterview, syncAdminFinds } from './interview/bot';
 import { getBoard, purgeExpiredInterviews, purgeOldBoards } from './interview/store';
@@ -121,6 +121,17 @@ const server = http.createServer(async (req, res) => {
             res.writeHead(500, { 'Content-Type': 'text/plain; charset=utf-8' });
             return res.end('Failed');
         }
+    }
+
+    // 웹 관리자가 명단 연결을 바꾸면 특전대 현황판을 바로 다시 그림 (헤더 x-relay-secret = cdabot_relay.secret, 웹이 같은 DB에서 읽음)
+    if (req.method === 'POST' && route === '/refresh-boards') {
+        if (!(await relaySecretOk(String(req.headers['x-relay-secret'] || '')).catch(() => false))) {
+            res.writeHead(403, { 'Content-Type': 'text/plain; charset=utf-8' });
+            return res.end('Forbidden');
+        }
+        await refreshAllBoards(bot.telegram).catch((err) => console.error('[현황판 전체 갱신 에러]:', getErrorMessage(err)));
+        res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });
+        return res.end('ok');
     }
 
     // maeum(코칭존)이 고쳐 올린 누적 결과지를 읽음: GET /board?chat=<방 ID>&day=YYYY-MM-DD, 헤더 x-board-secret = BOARD_SECRET (없으면 막음)

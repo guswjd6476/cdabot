@@ -11,7 +11,7 @@ import { query, runMigrations, setQueryable } from '../db';
 import { registerCore } from '../core/engine';
 import { createOrg, getGroupOrg, getMember, getSettings, loadSession, saveSession, setSetting, upsertMembership, upsertUser } from '../core/store';
 import { nowKst } from '../utils';
-import { registerSida } from './bot';
+import { refreshAllBoards, registerSida } from './bot';
 import * as S from './store';
 
 const ADMIN = 9000; // test-setup 의 ADMIN_IDS
@@ -455,6 +455,13 @@ test('주제방 현황판 — 한 메시지를 계속 갱신, 날짜 바뀌면 �
     assert.deepEqual([edit.payload.chat_id, edit.payload.message_id], [ROOM, board.messageId]);
     assert.match(edit.payload.text, /당일 결과<\/b> — 총 \d+건[^\n]*[\s\S]*• 강북\/U101: 발 \d+건[^\n]* · 찾 \d+건/);
     assert.match(edit.payload.text, /노원\/U102/); // 동명이인은 연결한 명단의 지역
+    // 웹에서 연결을 바꾸면 (POST /refresh-boards) 현황판 메시지를 바로 다시 그림
+    await query(`UPDATE cdabot_online_names SET member_code = 'B2' WHERE poster_tg = 102`);
+    calls = [];
+    await refreshAllBoards(bot.telegram);
+    const redraw = calls.find((c) => c.method === 'editMessageText')!;
+    assert.deepEqual([redraw.payload.chat_id, redraw.payload.message_id], [ROOM, board.messageId]);
+    assert.match(redraw.payload.text, /강북\/U102/);
     assert.match(edit.payload.text, /📋 오늘 올라온 결과<\/b> \d+건 \(눌러서 복사\)\n<pre>[^<]*발\/주제\/5678\/30대\n발\/주제2\/6789\/30대<\/pre>$/); // 이름별로 안 나누고 올라온 순서대로, 한 블록
 
     await setSetting(1, S.MODULE_KEY, 'board', { ...board, date: '2000-01-01' }); // 날짜가 바뀐 것처럼

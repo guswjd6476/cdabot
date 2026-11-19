@@ -199,7 +199,7 @@ test('등록 안 된 방에서는 저장 안 함 → 방등록 후 저장, 다�
     assert.match(out, /O 3 · 보류 1 · X 2/);
     // 확인 필요: 인도자 없음(이나래·박다솜), 행정에서 못 찾음(최미르), 동명이인(박다솜) — 후속 X(정보라·홍새봄)는 제외
     assert.match(out, /확인 필요<\/b> \(후속 X 제외\)\n• 인도자 없음: 이나래, 박다솜\n• 행정에서 못 찾음: 최미르\n• 행정에 같은 이름 여러 명: 박다솜/);
-    assert.doesNotMatch(out, /홍새봄|정보라/);
+    assert.doesNotMatch(out.split('\n\n🪖')[0], /홍새봄|정보라/); // 확인 필요에는 안 나옴 (특전대 등록 줄에는 대원 없는 사람으로 나올 수 있음)
     assert.match(await send(201, SHEET, GROUP), /새로 0 · 수정 6/);
     assert.equal((await query(`SELECT count(*)::int AS n FROM cdabot_interviews`)).rows[0].n, 6);
 });
@@ -360,13 +360,10 @@ test('특전대 양식으로 바꾸기 — 모두 발굴, 후속 O 는 찾기도
     assert.deepEqual(meetOf('평일12시전,노원거주/20살'), { at: '평일12시전', place: '노원거주' });
 });
 
-test('/인터뷰 특전대 — 특전대 주차면 결과지 올릴 때 자동 등록(현황판 반영), 인도자와 같은 이름 대원 실적, 두 번 등록 안 됨', async () => {
+test('/인터뷰 특전대 — 특전대 기간을 안 만들어도 결과지 올릴 때 자동 등록(현황판 반영), 인도자와 같은 이름 대원 실적, 두 번 등록 안 됨', async () => {
     const u = await upsertUser(4242, '양하늘');
     await upsertMembership(1, u.id, 'special', '양하늘', 'active');
     const sheet = `날짜: 2026.10.2\n구분: 향수행사\n▪️후속연결O\n#이가온/성북/양하늘/손바람/10.30(금),노원/07.10.12, 010-1234-0001\n▪️후속연결X\n#김건모/노원/문별/황금새/남 22살`;
-    assert.doesNotMatch(await send(ADMIN, sheet), /특전대/); // 특전대 주차가 없으면 등록 안 함
-    assert.match(await send(ADMIN, '/인터뷰 특전대 2026.10.2'), /특전대 기간\(주차\)이 아닌/);
-    await createPeriod(1, '2026-09-28'); // 10.2(금)가 든 주차
     const saved = await send(ADMIN, sheet);
     assert.match(saved, /2명 저장/);
     assert.match(saved, /🪖 10\/2 \[향수행사\] 특전대 결과 2건 등록 \(현황판 반영\)/);
@@ -388,6 +385,24 @@ test('/인터뷰 특전대 — 특전대 주차면 결과지 올릴 때 자동 �
     calls = [];
     await bot.handleUpdate({ update_id: ++n, callback_query: { id: String(n), from: { id: ADMIN, is_bot: false, first_name: 'A' }, chat_instance: 'x', data: okData, message: { message_id: 1, date: 0, chat: { id: ADMIN, type: 'private' }, text: '.' } } } as any);
     assert.match(calls.filter((c) => c.method === 'sendMessage').map((c) => c.payload.text).join('\n'), /특전대 결과 1건 등록/);
+});
+
+test('/인터뷰 특전대 — 인도자가 동명이인이면 결과지 인도자지역으로 대원 구분 (웹 명단 연결 지역 또는 이름의 (지역))', async () => {
+    const a = await upsertUser(5151, '이유진');
+    await upsertMembership(1, a.id, 'special', '이유진', 'active');
+    const b = await upsertUser(5252, '이유진');
+    await upsertMembership(1, b.id, 'special', '이유진(노원)', 'active');
+    await query(`INSERT INTO members VALUES ('Y1', '이유진', '강북', '1-1'), ('Y2', '이유진', '노원', '2-1')`);
+    await query(`INSERT INTO cdabot_online_names (poster_tg, name, member_code) VALUES (5151, '이유진', 'Y1')`); // 강북 이유진은 웹에서 연결
+    const sheet = `날짜: 2026.10.1\n구분: 향수행사\n▪️후속연결X\n#강북손님/강북구/이유진/황금새/메모\n#노원손님/노원/이유진/황금새/메모\n#모름손님/성북/이유진/황금새/메모`;
+    const out = await send(ADMIN, sheet);
+    assert.match(out, /특전대 결과 2건 등록/);
+    assert.match(out, /제외 1명: 모름손님\(이유진\)/); // 지역이 맞는 대원이 없으면 등록 안 함
+    const rs = (await query(`SELECT r.name, u.telegram_id::text AS tg FROM cdabot_results r JOIN cdabot_users u ON u.id = r.user_id WHERE r.activity_date = '2026-10-01' ORDER BY r.name`)).rows;
+    assert.deepEqual(rs.map((r) => [r.name, r.tg]), [['강북손님', '5151'], ['노원손님', '5252']]);
+    // 인도지역·인도팀은 실적 대원의 명단 연결(구역 '1-1' → 팀 1), 연결 없으면 결과지 지역
+    const rt = (await query(`SELECT name, region, team FROM cdabot_results WHERE activity_date = '2026-10-01' ORDER BY name`)).rows;
+    assert.deepEqual(rt.map((r) => [r.name, r.region, r.team]), [['강북손님', '강북', '1'], ['노원손님', '노원', null]]);
 });
 
 test('특전대 기간에 발굴한 사람의 인터뷰 사후 보고서(후속 신청)가 카운셀링 봇에 올라오면 → 그 발굴 대원의 찾기건 자동 등록', async () => {

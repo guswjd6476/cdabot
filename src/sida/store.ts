@@ -288,16 +288,19 @@ export async function saveSnapshot(periodId: number, userId: number | null, data
     await query(`INSERT INTO cdabot_schedule_snapshots (period_id, generated_by, data) VALUES ($1, $2, $3);`, [periodId, userId, JSON.stringify(data)]);
 }
 
-// 대원 지역 (웹 명단 members): 웹 '온라인 전도'에서 텔레그램 계정과 연결한 명단이 있으면 그 지역, 없으면 이름이 같은 사람이 명단에 한 명뿐일 때 그 지역
+// 대원의 웹 명단(members) 지역·팀(구역 앞자리): 웹에서 텔레그램 계정과 연결한 명단이 있으면 그 사람, 없으면 이름이 같은 사람이 명단에 한 명뿐일 때 그 사람
 // members 표가 없거나 읽기 실패하면 빈 값 (현황판은 지역 없이 그대로)
-export async function memberRegions(members: { telegram_id: string; display_name: string }[]): Promise<Map<string, string>> {
+export type MemberInfo = { region: string | null; team: string | null };
+export async function memberInfo(members: { telegram_id: string; display_name: string }[]): Promise<Map<string, MemberInfo>> {
     if (!members.length) return new Map();
     const r = await query(
-        `SELECT t.tg, COALESCE(
-                (SELECT m."지역" FROM cdabot_online_names n JOIN members m ON m."고유번호" = n.member_code WHERE n.poster_tg = t.tg::bigint),
-                (SELECT min(m."지역") FROM members m WHERE m."이름" = t.name HAVING count(*) = 1)) AS region
-         FROM unnest($1::text[], $2::text[]) AS t(tg, name);`,
+        `SELECT t.tg, m."지역" AS region, NULLIF(split_part(m."구역", '-', 1), '') AS team
+         FROM unnest($1::text[], $2::text[]) AS t(tg, name)
+         CROSS JOIN LATERAL (SELECT COALESCE(
+                (SELECT n.member_code FROM cdabot_online_names n WHERE n.poster_tg = t.tg::bigint),
+                (SELECT min(x."고유번호") FROM members x WHERE x."이름" = t.name HAVING count(*) = 1)) AS code) c
+         JOIN members m ON m."고유번호" = c.code;`,
         [members.map((m) => m.telegram_id), members.map((m) => m.display_name)]
     ).catch(() => ({ rows: [] as any[] }));
-    return new Map(r.rows.filter((x) => x.region).map((x) => [x.tg as string, x.region as string]));
+    return new Map(r.rows.map((x) => [x.tg as string, { region: x.region ?? null, team: x.team ?? null }]));
 }

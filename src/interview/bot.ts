@@ -44,7 +44,7 @@ const ACTIONS: Record<string, Action> = {
     미등록: { label: '⏳ 행정 미등록', need: 'pii', place: 'private', run: (ctx, a, args) => unregistered(ctx, a, args) },
     검색: { need: 'pii', place: 'private', run: (ctx, a, args) => searchName(ctx, a, args) },
     삭제: { need: null, place: 'any', run: (ctx, a, args) => removeInterview(ctx, a, args) },
-    특전대: { need: 'manager', place: 'any', run: (ctx, a, args) => sidaPreview(ctx, a, args) }, // 특전대 기간에만 (메뉴엔 안 보임)
+    특전대: { need: 'manager', place: 'any', run: (ctx, a, args) => sidaPreview(ctx, a, args) }, // 빠진 사람 다시 넣기 (메뉴엔 안 보임)
     도움말: { label: '❓ 도움말', need: null, place: 'any', run: (ctx) => ctx.reply(HELP, { parse_mode: 'HTML' }) },
     방등록: { need: 'manager', place: 'group', run: registerGroup },
     방해제: { need: 'manager', place: 'group', run: unregisterGroup },
@@ -118,8 +118,8 @@ async function handleSheet(ctx: Ctx, text: string): Promise<boolean> {
         ['행정에서 못 찾음', st.filter((x) => !x.student_id && x.match_note === 'none')],
         ['행정에 같은 이름 여러 명', st.filter((x) => x.match_note === 'multi')],
     ].filter(([, xs]) => xs.length) as [string, { name: string }[]][];
-    // 특전대 주차면 바로 특전대 결과로 등록 → 현황판에 반영
-    const sida = (await inSidaWeek(a.org!.id, date)) ? await toSida(ctx, a as A, date, kind) : null;
+    // 올라오는 결과지는 모두 특전대 결과로 등록 → 현황판에 반영
+    const sida = await toSida(ctx, a as A, date, kind);
     const checkText = checks.length
         ? `\n\n⚠️ <b>확인 필요</b> (후속 X 제외)\n${checks.map(([t, xs]) => `• ${t}: ${names(xs)}`).join('\n')}\n<i>인도자 이름이 행정과 같아야 연결됩니다. 고쳐서 다시 보내면 덮어씁니다.</i>`
         : '';
@@ -136,7 +136,7 @@ async function handleSheet(ctx: Ctx, text: string): Promise<boolean> {
 }
 
 /* ====================== 특전대 결과로 등록 ====================== */
-// 인터뷰한 사람은 모두 발굴건, 후속연결 O 는 찾기건도. 특전대 주차에 결과지를 올리면 자동 등록,
+// 인터뷰한 사람은 모두 발굴건, 후속연결 O 는 찾기건도. 결과지를 올리면 자동 등록,
 //   '/인터뷰 특전대' 는 미리보기 → 확인 후 등록 (대원 이름을 고친 뒤 다시 넣을 때)
 // 실적 대원: 특전대 대원 중 인도자와 같은 이름(한 명일 때), 없으면 등록하지 않음
 
@@ -144,14 +144,20 @@ const KIND_CODE: Record<InterviewKind, string> = { 향수행사: 'h', 당터뷰:
 const kindOfCode = (c: string): InterviewKind | undefined => (c === 'h' ? '향수행사' : c === 'd' ? '당터뷰' : undefined);
 const SIDA_MK = SS.MODULE_KEY; // 특전대 대원 모듈 ('special')
 
-// 특전대 기간: 관리자가 만든 특전대 기간(주차시작) 안의 날짜일 때만 등록 기능을 켬
-const inSidaWeek = async (orgId: number, date: string) => !!(await SS.getPeriodAt(orgId, date));
 
-// 인도자 이름 → 같은 이름의 특전대 대원 (한 명일 때만)
+// 인도자 이름 → 같은 이름의 특전대 대원. 동명이인이면 결과지 인도자지역과 대원 지역(웹 명단 연결, 또는 이름에 적은 '이유진(강북)')이 맞는 한 명
+// info: 그 대원의 명단 지역·팀 (결과의 인도지역·인도팀으로 씀)
 async function sidaOwners(orgId: number) {
-    const byName = new Map<string, number[]>();
-    for (const m of await listMembers(orgId, SIDA_MK)) byName.set(m.display_name.replace(/\s+/g, ''), [...(byName.get(m.display_name.replace(/\s+/g, '')) || []), m.user_id]);
-    return (g?: string | null) => (g && byName.get(g)?.length === 1 ? { id: byName.get(g)![0], name: g } : undefined);
+    const members = await listMembers(orgId, SIDA_MK);
+    const info = await SS.memberInfo(members);
+    const key = (n: string) => n.replace(/\([^)]*\)|\s+/g, ''); // '이유진(강북)' 도 이유진
+    const sameRegion = (a: string, b: string) => !!a && !!b && (a.includes(b) || b.includes(a)); // '강북구' = '강북'
+    return (g?: string | null, region?: string | null) => {
+        if (!g) return undefined;
+        let hit = members.filter((m) => key(m.display_name) === key(g));
+        if (hit.length > 1 && region) hit = hit.filter((m) => sameRegion(info.get(m.telegram_id)?.region ?? m.display_name.match(/\(([^)]*)\)/)?.[1] ?? '', region.trim()));
+        return hit.length === 1 ? { id: hit[0].user_id, name: hit[0].display_name, info: info.get(hit[0].telegram_id) } : undefined;
+    };
 }
 
 // 특전대 기간에 발굴한 사람의 인터뷰 사후 보고서가 카운셀링 봇에 후속 [신청]으로 올라오면(만남 확인) 특전대 찾기건으로 자동 등록
@@ -179,7 +185,6 @@ export async function syncAdminFinds(telegram: Telegraf['telegram']) {
     }
 }
 
-const NOT_SIDA_WEEK = 'ℹ️ 특전대 기간(주차)이 아닌 날짜라 특전대 결과로 등록하지 않습니다.';
 
 async function sidaPlan(a: A, date: string, kind?: InterviewKind) {
     const people = (await S.listInterviews(a.org.id, { from: date, to: date, kind })).rows.filter((r) => r.name);
@@ -193,13 +198,16 @@ async function sidaPlan(a: A, date: string, kind?: InterviewKind) {
     }
     const opts = await SS.listOptions(a.org.id);
     const ownerOf = await sidaOwners(a.org.id);
-    const items = people.flatMap((r) =>
-        interviewToForms(r, info.get(r.guides[0]), nowKst().year()).map((f) => {
+    const items = people.flatMap((r) => {
+        const owner = ownerOf(r.guides[0], r.region);
+        // 인도지역·인도팀: 실적 대원의 명단 연결(구역까지) 우선, 없으면 행정에서 인도자 이름으로 찾은 것
+        const guide = owner?.info?.region ? owner.info : info.get(r.guides[0]);
+        return interviewToForms(r, guide, nowKst().year()).map((f) => {
             const c = R.cleanForm(f, opts);
             const empty = R.missingCount({ kind: c.kind, ...c.values });
-            return { ...c, notes: [...c.notes, ...(empty ? [`빈 칸 ${empty}개`] : [])], key: `iv:${r.id}:${c.kind}`, owner: ownerOf(r.guides[0]) };
-        })
-    );
+            return { ...c, notes: [...c.notes, ...(empty ? [`빈 칸 ${empty}개`] : [])], key: `iv:${r.id}:${c.kind}`, owner };
+        });
+    });
     const saved = await SS.savedKeys(items.map((x) => x.key));
     const fresh = items.filter((x) => !saved.has(x.key));
     // 인도자와 같은 이름의 대원이 없으면 등록하지 않음 (누른 사람 실적으로 잡히면 안 됨)
@@ -224,7 +232,6 @@ function sidaArgs(args: string) {
 async function sidaPreview(ctx: Ctx, a: A, args: string, given?: { date: string; kind?: InterviewKind }) {
     const { date, kind } = given ?? sidaArgs(args);
     if (!date) return void (await ctx.reply('사용법: /인터뷰 특전대 10.26 [향수|당터뷰]'));
-    if (!(await inSidaWeek(a.org.id, date))) return void (await ctx.reply(NOT_SIDA_WEEK));
     const p = await sidaPlan(a, date, kind);
     const title = `🪖 <b>${md(date)}${kindTitle(kind)} 특전대 결과로 등록</b>`;
     const skipped = p.unmatched.length ? `\n\n⏭ 인도자와 같은 이름의 특전대 대원이 없어 제외 ${p.unmatched.length}명: ${e(p.unmatched.join(', '))}` : '';
@@ -242,7 +249,6 @@ async function sidaPreview(ctx: Ctx, a: A, args: string, given?: { date: string;
 }
 
 async function sidaRegister(ctx: Ctx, a: A, date: string, kind?: InterviewKind) {
-    if (!(await inSidaWeek(a.org.id, date))) return void (await ctx.reply(NOT_SIDA_WEEK));
     await ctx.reply(sidaSummary(date, kind, await toSida(ctx, a, date, kind)), { parse_mode: 'HTML' });
 }
 
@@ -535,7 +541,7 @@ const HELP =
     `<b>관리자</b> (봇과 1:1) — 명령 뒤에 <code>향수</code> 또는 <code>당터뷰</code>를 붙이면 그 구분만 (예: <code>/인터뷰 단계 향수 10.1~10.24</code>)\n• <code>/인터뷰 현황 [10.1~10.24]</code> — 인터뷰 수, 행정 등록·단계, 인터뷰자별·지역별\n` +
     `• <code>/인터뷰 행정 [기간]</code> — 행정에 등록된 인터뷰 대상자를 현재 단계별로 (기본 전체, 개인정보 권한)\n` +
     `• <code>/인터뷰 미등록 [기간]</code> — 후속 O·보류인데 행정에 없는 사람 (개인정보 권한)\n• <code>/인터뷰 검색 이름</code> (개인정보 권한)\n` +
-    `• <code>/인터뷰 특전대 [10.26] [향수|당터뷰]</code> — 특전대 기간(주차)에만, 그날 인터뷰한 사람을 특전대 결과로 (모두 발굴, 후속 O 는 찾기도. 미리보기 후 등록)\n` +
+    `• <code>/인터뷰 특전대 [10.26] [향수|당터뷰]</code> — 그날 인터뷰한 사람을 특전대 결과로 (모두 발굴, 후속 O 는 찾기도. 미리보기 후 등록)\n` +
     `• 단체방에서 <code>/인터뷰 방등록 [조직이름]</code> (조직이름을 적으면 그 조직으로, 예: 방등록 5기) · <code>방해제</code> · 1:1 에서 <code>/인터뷰 조직</code> — 조직 바꾸기\n` +
     `• <code>/인터뷰 단계 [10.1~10.24]</code> — 찾등·합등한 인터뷰 대상자 (후속연결 O 포함, 기본 전체 기간, 기간을 적으면 그 기간 완료자만, 개인정보 권한)\n\n` +
     `<b>시스템 관리자</b>: <code>/인터뷰 권한 ID manager,pii [이름]</code> · <code>/인터뷰 보관기간 365</code>\n\n` +
